@@ -158,7 +158,7 @@ def test_node_shell_targets_context_and_host_namespaces(qtbot, monkeypatch, work
     opened = []
     ws = workspaces(SimpleNamespace(), "cluster-a")
     monkeypatch.setattr(NodeShellDialog, "exec", lambda d: QDialog.Accepted)
-    monkeypatch.setattr(module, "open_terminal", opened.append)
+    monkeypatch.setattr(module, "open_terminal", lambda argv, terminal: opened.append(argv))
     monkeypatch.setattr(ClusterWorkspace, "_run", lambda self, fn, cb, *args: cb(fn(*args)))
     ws.node_table.action_requested.emit("node-shell", node_row())
     assert opened == [node_shell_args("cluster-a", "node-a")]
@@ -203,7 +203,9 @@ def test_macos_terminal_command_is_quoted(monkeypatch):
     argv = node_shell_args("context with spaces;echo nope", "node-a")
     terminal.open_terminal(argv)
     assert calls[0][0] == "osascript"
-    assert shlex.split(calls[0][-1]) == argv
+    wrapper = shlex.split(calls[0][-1])
+    assert wrapper[:2] == ["exec", sys.executable]
+    assert json.loads(wrapper[4]) == argv
     assert argv[2] not in calls[0][2]  # command data never becomes AppleScript source
 
 
