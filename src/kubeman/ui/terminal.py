@@ -22,7 +22,7 @@ def kubectl_args(action, context, namespace, pod, container=None):
 
 
 def node_shell_args(context, node, namespace="default", image=NODE_SHELL_IMAGE):
-    """Linux pod/namespace setup used by kvaps/kubectl-node-shell.
+    """Linux defaults from the installed kubectl-node-shell v1.11.0 script.
 
     Use kubectl's attached run/--rm lifecycle so this works on all local
     platforms without installing the shell plugin or requiring a local shell.
@@ -33,17 +33,20 @@ def node_shell_args(context, node, namespace="default", image=NODE_SHELL_IMAGE):
         "hostPID": True,
         "hostIPC": True,
         "hostNetwork": True,
+        "imagePullSecrets": None,
         "containers": [{
             "name": "nsenter", "image": image,
             "securityContext": {"privileged": True},
             "stdin": True, "stdinOnce": True, "tty": True,
             "command": ["nsenter", "--target", "1", "--mount", "--uts", "--ipc",
                         "--net", "--pid", "bash", "-l"],
+            "resources": {}, "volumeMounts": [],
         }],
         "tolerations": [
             {"key": "CriticalAddonsOnly", "operator": "Exists"},
             {"effect": "NoExecute", "operator": "Exists"},
         ],
+        "volumes": [],
     }}
     return ["kubectl", "--context", context, "--namespace", namespace,
             "run", pod, "--image", image, "--restart=Never", "--rm", "-it",

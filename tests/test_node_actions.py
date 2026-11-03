@@ -174,7 +174,10 @@ def test_node_shell_targets_context_and_host_namespaces(qtbot, monkeypatch, work
         "stdin": True, "stdinOnce": True, "tty": True,
         "command": ["nsenter", "--target", "1", "--mount", "--uts", "--ipc",
                     "--net", "--pid", "bash", "-l"],
+        "resources": {}, "volumeMounts": [],
     }]
+    assert spec["imagePullSecrets"] is None
+    assert spec["volumes"] == []
     assert spec["tolerations"] == [
         {"key": "CriticalAddonsOnly", "operator": "Exists"},
         {"effect": "NoExecute", "operator": "Exists"},
