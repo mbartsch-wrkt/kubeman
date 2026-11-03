@@ -177,6 +177,10 @@ class ClusterWorkspace(QMainWindow):
             return
         self._loading.add(key)
         title = self.views[key][1]
+        widget = self.views[key][0]
+        table = widget if isinstance(widget, ResourceTable) else None
+        if table is not None:
+            table.set_loading()
         started = perf_counter()
         self.message.emit(f"{self.context} / {title}: Loading…")
 
@@ -186,6 +190,8 @@ class ClusterWorkspace(QMainWindow):
                 return
             if self._loads[key] == namespace:
                 if error:
+                    if table is not None:
+                        table.set_error(data)
                     self.message.emit(f"{self.context} / {title}: {data}")
                 else:
                     sink(data)

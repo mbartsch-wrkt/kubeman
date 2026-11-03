@@ -1,5 +1,5 @@
-from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal, QTimer
-from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QMenu, QTableView, QVBoxLayout, QWidget
+from PySide6.QtCore import QElapsedTimer, QSortFilterProxyModel, Qt, Signal, QTimer
+from PySide6.QtWidgets import QAbstractItemView, QLabel, QLineEdit, QMenu, QTableView, QVBoxLayout, QWidget
 
 from .table_model import TableModel
 
@@ -28,6 +28,11 @@ class ResourceTable(QWidget):
         self._filter_timer = QTimer(self, interval=200, singleShot=True)
         self._filter_timer.timeout.connect(lambda: self.proxy.setFilterFixedString(self.filter.text()))
         self.filter.textChanged.connect(lambda _: self._filter_timer.start())
+        self.status = QLabel("Not loaded")
+        self.status.setWordWrap(True)
+        self._load_clock = QElapsedTimer()
+        self._load_timer = QTimer(self, interval=1000)
+        self._load_timer.timeout.connect(self._loading_tick)
         self.view = QTableView()
         self.view.setModel(self.proxy)
         self.view.setSortingEnabled(True)
@@ -48,11 +53,26 @@ class ResourceTable(QWidget):
         self.view.customContextMenuRequested.connect(self._context_menu)
         lay = QVBoxLayout(self)
         lay.addWidget(self.filter)
+        lay.addWidget(self.status)
         lay.addWidget(self.view)
 
+    def set_loading(self):
+        self._load_clock.start()
+        self.status.setText("Loading…")
+        self._load_timer.start()
+
+    def _loading_tick(self):
+        self.status.setText(f"Loading… {self._load_clock.elapsed() // 1000}s")
+
+    def set_error(self, message):
+        self._load_timer.stop()
+        self.status.setText(f"Load failed: {message}")
+
     def set_rows(self, rows):
+        self._load_timer.stop()
         self.model.set_rows(rows)
         self.view.resizeColumnsToContents()
+        self.status.setText(f"{self.model.rowCount():,} rows" if self.model.rowCount() else "No resources found")
 
     def _context_menu(self, pos):
         idx = self.view.indexAt(pos)

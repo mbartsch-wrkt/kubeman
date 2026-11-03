@@ -112,6 +112,9 @@ class KubeService:
         config.load_kube_config(context=context, client_configuration=cfg)
         cfg.retries = 1  # the default (3 retries with backoff) makes a dead cluster take ~9s to report
         api = client.ApiClient(cfg)
+        # Pod manifests (especially managedFields) can make list responses huge.
+        # urllib3 decodes gzip automatically, but does not request it by default.
+        api.set_default_header("Accept-Encoding", "gzip")
         core = client.CoreV1Api(api)
         try:
             core.get_api_resources(_request_timeout=10)  # fail fast on bad creds/unreachable

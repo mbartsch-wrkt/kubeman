@@ -13,6 +13,42 @@ from kubeman.ui.resource_table import ResourceTable
 from kubeman.ui.workspace import ClusterWorkspace
 
 
+def test_connection_requests_compressed_responses(monkeypatch):
+    from kubeman.k8s import client as module
+
+    monkeypatch.setattr(module.config, 'load_kube_config', lambda **kw: None)
+    clients = []
+
+    def core(api):
+        clients.append(api)
+        return SimpleNamespace(get_api_resources=lambda **kw: None)
+
+    monkeypatch.setattr(module.client, 'CoreV1Api', core)
+    svc = KubeService()
+    svc.connect('test')
+    assert clients[0].default_headers['Accept-Encoding'] == 'gzip'
+    clients[0].close()
+
+
+def test_pod_loading_and_errors_remain_visible_in_view(qtbot):
+    ws = ClusterWorkspace(None, 'test')
+    qtbot.addWidget(ws)
+    pending = []
+    ws._run = lambda fn, ok, *args, on_error=None: pending.append((ok, on_error))
+    ws.loaders['pods'] = (lambda ns: [], True, ws.pod_table.set_rows)
+    ws.load_view('pods')
+    assert ws.pod_table.status.text() == 'Loading…'
+    ws.pod_table._loading_tick()
+    assert ws.pod_table.status.text().startswith('Loading… 0s')
+    pending.pop()[1]('ReadTimeoutError')
+    assert ws.pod_table.status.text() == 'Load failed: ReadTimeoutError'
+    assert not ws.pod_table._load_timer.isActive()
+    ws.load_view('pods')
+    pending.pop()[0]([])
+    assert ws.pod_table.status.text() == 'No resources found'
+    assert not ws.pod_table._load_timer.isActive()
+
+
 def test_pagination_keeps_scope_and_all_pages():
     calls = []
 
