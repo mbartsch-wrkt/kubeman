@@ -1,0 +1,114 @@
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDockWidget, QMainWindow, QMessageBox, QTabWidget
+
+from .log_view import shutdown_all
+from .navigator import Navigator
+from .workspace import ClusterWorkspace
+
+
+class MainWindow(QMainWindow):
+    """Shell: the cluster navigator on the left and one workspace tab per open cluster.
+
+    `service_factory` is called once per cluster so every workspace gets its own connection.
+    """
+
+    def __init__(self, service_factory):
+        super().__init__()
+        self.factory = service_factory
+        self.workspaces = {}  # context name -> ClusterWorkspace
+        self.setWindowTitle("Kubeman")
+        self.resize(1500, 850)
+
+        self.clusters = QTabWidget()
+        self.clusters.setTabsClosable(True)
+        self.clusters.tabCloseRequested.connect(self._close_cluster_tab)
+        self.clusters.currentChanged.connect(self._on_cluster_changed)
+        self.setCentralWidget(self.clusters)
+
+        self.nav = Navigator()
+        nav_dock = QDockWidget("Clusters", self)
+        nav_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        nav_dock.setWidget(self.nav)
+        nav_dock.setMinimumWidth(220)
+        self.addDockWidget(Qt.LeftDockWidgetArea, nav_dock)
+        self.nav.context_clicked.connect(self.open_cluster)
+        self.nav.view_requested.connect(self._open_view)
+
+        self.status = self.statusBar()
+        contexts, active = self.factory().load_contexts()
+        self.nav.set_contexts(contexts)
+        if not contexts:
+            self.status.showMessage("No kubeconfig contexts found")
+        else:
+            self.open_cluster(active if active in contexts else contexts[0])
+
+    # ---- clusters ------------------------------------------------------
+    def workspace(self, context=None):
+        """The workspace for `context`, or the one in the current tab."""
+        return self.workspaces.get(context) if context else self.clusters.currentWidget()
+
+    def open_cluster(self, ctx):
+        """Open `ctx` in its own tab, or focus it if it is already open."""
+        if ctx in self.workspaces:
+            self.clusters.setCurrentWidget(self.workspaces[ctx])
+            return
+        ws = ClusterWorkspace(self.factory(), ctx)
+        self.workspaces[ctx] = ws
+        ws.message.connect(self.status.showMessage)
+        ws.state.connect(lambda s, c=ctx: self._on_state(c, s))
+        ws.failed.connect(lambda m, c=ctx: self._on_failed(c, m))
+        ws.view_opened.connect(lambda key, c=ctx: self._on_view_opened(c, key))
+        self.clusters.setCurrentIndex(self.clusters.addTab(ws, ctx))
+        ws.start()
+
+    def _on_state(self, ctx, state):
+        self.nav.set_state(ctx, state)
+        if state == "connected":
+            self.nav.show_views(ctx)
+
+    def _on_failed(self, ctx, msg):
+        self._discard(ctx)
+        self.nav.set_state(ctx, "failed")  # after _discard, which resets the dot to idle
+        self.status.showMessage(f"{ctx}: {msg}")
+        QMessageBox.warning(self, "Cannot connect", f"{ctx}\n\n{msg}")
+
+    def _close_cluster_tab(self, index):
+        ws = self.clusters.widget(index)
+        self._discard(ws.context)
+
+    def _discard(self, ctx):
+        ws = self.workspaces.pop(ctx, None)
+        if ws is None:
+            return
+        self.clusters.removeTab(self.clusters.indexOf(ws))
+        ws.shutdown()
+        ws.deleteLater()
+        self.nav.hide_views(ctx)
+        self.nav.set_state(ctx, "idle")
+
+    def _open_view(self, ctx, key):
+        ws = self.workspaces.get(ctx)
+        if ws is None:
+            return
+        self.clusters.setCurrentWidget(ws)
+        ws.open_view(key)
+
+    def _on_view_opened(self, ctx, key):
+        if self.clusters.currentWidget() is self.workspaces.get(ctx):
+            self.nav.select_view(ctx, key)
+
+    def _on_cluster_changed(self, index):
+        ws = self.clusters.widget(index)
+        self.setWindowTitle(f"Kubeman — {ws.context}" if ws else "Kubeman")
+        if ws is None:
+            return
+        if ws.tabs.count():
+            self.nav.select_view(ws.context, ws.tabs.currentWidget().view_key)
+        else:
+            self.nav.select_cluster(ws.context)
+
+    def closeEvent(self, event):
+        for ws in self.workspaces.values():
+            ws.shutdown()
+        shutdown_all()
+        super().closeEvent(event)
