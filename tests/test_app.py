@@ -124,7 +124,7 @@ class FakeService:
         return sc.pop(0) if len(sc) > 1 else sc[0]
 
     def list_nodes(self):
-        return [NodeRow("n1", "Ready", "worker", "v1", "1.1.1.1", "4", "8Gi", "1d", {"kind": "Node"})]
+        return [NodeRow("n1", "Ready", "worker", "v1", "1.1.1.1", 4.0, 8.0, "1d", {"kind": "Node"})]
 
 
 def test_window_populates_tables(qtbot):
@@ -260,8 +260,8 @@ def test_navigator_and_logs(qtbot):
     win = MainWindow(FakeService)
     qtbot.addWidget(win)
     ws = win.workspace("ctx")
-    qtbot.waitUntil(lambda: win.nav.topLevelItem(0).childCount() > 0, timeout=5000)
-    top = win.nav.topLevelItem(0)
+    qtbot.waitUntil(lambda: win.nav.cluster_item("ctx").childCount() > 0, timeout=5000)
+    top = win.nav.cluster_item("ctx")
     labels = [top.child(i).text(0) for i in range(top.childCount())]
     assert labels == ["Overview", "Nodes", "Workloads", "Config", "Network", "Storage", "Namespaces", "Events"]
     groups = {top.child(i).text(0): [top.child(i).child(j).text(0) for j in range(top.child(i).childCount())]
@@ -410,13 +410,13 @@ def test_multiple_clusters_open_in_separate_tabs(qtbot, monkeypatch):
     win = MainWindow(MultiService)
     qtbot.addWidget(win)
     assert [win.clusters.tabText(i) for i in range(win.clusters.count())] == ["a"]  # active context opens at startup
-    qtbot.waitUntil(lambda: win.nav.topLevelItem(0).childCount() > 0, timeout=5000)
+    qtbot.waitUntil(lambda: win.nav.cluster_item("a").childCount() > 0, timeout=5000)
 
     win.nav.context_clicked.emit("b")
     assert [win.clusters.tabText(i) for i in range(win.clusters.count())] == ["a", "b"]
     assert win.windowTitle().endswith("b") and win.workspace() is win.workspace("b")
-    qtbot.waitUntil(lambda: win.nav.topLevelItem(1).childCount() > 0, timeout=5000)
-    assert win.nav.topLevelItem(0).childCount() > 0  # both clusters stay expanded in the navigator
+    qtbot.waitUntil(lambda: win.nav.cluster_item("b").childCount() > 0, timeout=5000)
+    assert win.nav.cluster_item("a").childCount() > 0  # both clusters stay expanded in the navigator
 
     win.nav.context_clicked.emit("a")  # already open: focus, no duplicate tab
     assert win.clusters.count() == 2 and win.workspace() is win.workspace("a")
@@ -435,8 +435,8 @@ def test_multiple_clusters_open_in_separate_tabs(qtbot, monkeypatch):
 
     # closing a cluster tab tears down only that cluster
     win._close_cluster_tab(win.clusters.indexOf(b))
-    assert list(win.workspaces) == ["a"] and win.nav.topLevelItem(1).childCount() == 0
-    assert win.nav.topLevelItem(0).childCount() > 0 and win.clusters.count() == 1
+    assert list(win.workspaces) == ["a"] and win.nav.cluster_item("b").childCount() == 0
+    assert win.nav.cluster_item("a").childCount() > 0 and win.clusters.count() == 1
     win.nav.context_clicked.emit("b")  # and it can be reopened
     assert win.clusters.count() == 2
 
@@ -452,7 +452,7 @@ def test_failed_cluster_connection_closes_its_tab(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: bool(warnings), timeout=5000)
     assert "unreachable" in warnings[0] and "bad" in warnings[0]
     assert "bad" not in win.workspaces and win.clusters.count() == 1  # dead tab removed, "a" untouched
-    assert win.nav.topLevelItem(2).childCount() == 0
+    assert win.nav.cluster_item("bad").childCount() == 0
 
 
 def _pod(name, status="Running", ready="1/1", issue="", deleting=False):
@@ -596,3 +596,128 @@ def test_scale_down_monitor_counts_pods_actually_removed(qtbot):
     assert mon.state == "progress" and mon.bar.value() == 0 and "2 terminating" in mon.status.text()
     qtbot.waitUntil(lambda: mon.state == "complete", timeout=3000)
     assert mon.bar.value() == 2 and mon.pods.rowCount() == 1
+
+
+def test_map_node_formats_cpu_cores_and_memory_gib():
+    node = client.V1Node(
+        metadata=client.V1ObjectMeta(name="n", creation_timestamp=NOW),
+        status=client.V1NodeStatus(allocatable={"cpu": "1500m", "memory": "16261800Ki"}))
+    row = map_node(node)
+    assert row.cpu == 1.5 and abs(row.memory - 15.509) < 0.001  # 16261800 KiB / 2**20
+    whole = map_node(client.V1Node(metadata=client.V1ObjectMeta(name="n", creation_timestamp=NOW),
+                                   status=client.V1NodeStatus(allocatable={"cpu": "20", "memory": "8Gi"})))
+    assert (whole.cpu, whole.memory) == (20.0, 8.0)
+    bare = map_node(client.V1Node(metadata=client.V1ObjectMeta(name="n", creation_timestamp=NOW), status=client.V1NodeStatus()))
+    assert (bare.cpu, bare.memory) == (0.0, 0.0)  # no allocatable reported
+
+
+def test_nodes_table_displays_formatted_but_sorts_numerically(qtbot):
+    from PySide6.QtCore import Qt
+
+    win = MainWindow(FakeService)
+    qtbot.addWidget(win)
+    ws = win.workspace("ctx")
+    ws.open_view("nodes")
+    qtbot.waitUntil(lambda: ws.node_table.model.rowCount() == 1, timeout=5000)
+    m = ws.node_table.model
+    cols = [c[0] for c in m.columns]
+    assert "CPU (cores)" in cols and "Memory (GiB)" in cols
+    cpu, mem = m.index(0, cols.index("CPU (cores)")), m.index(0, cols.index("Memory (GiB)"))
+    assert m.data(cpu) == "4.0" and m.data(mem) == "8.00"
+    assert m.data(cpu, Qt.EditRole) == 4.0 and isinstance(m.data(mem, Qt.EditRole), float)  # sort keys stay numeric
+
+
+def test_navigator_sections_and_state_moves(qtbot):
+    from kubeman.ui.navigator import Navigator
+
+    nav = Navigator()
+    qtbot.addWidget(nav)
+    nav.set_contexts(["a", "b", "c"])
+
+    def sections():
+        return {nav.topLevelItem(i).text(0).split(" (")[0]: [nav.topLevelItem(i).child(j).text(0)
+                                                             for j in range(nav.topLevelItem(i).childCount())]
+                for i in range(nav.topLevelItemCount())}
+
+    assert sections() == {"CONNECTED": [], "DISCONNECTED": ["a", "b", "c"]}
+    assert nav.topLevelItem(0).text(0) == "CONNECTED (0)" and nav.topLevelItem(1).text(0) == "DISCONNECTED (3)"
+    nav.set_state("c", "connecting")  # connecting counts as connected so it jumps to the top at once
+    nav.set_state("a", "connected")
+    assert sections() == {"CONNECTED": ["a", "c"], "DISCONNECTED": ["b"]}  # kubeconfig order kept inside a section
+    assert nav.topLevelItem(0).text(0) == "CONNECTED (2)" and nav.topLevelItem(1).text(0) == "DISCONNECTED (1)"
+    nav.show_views("a")
+    assert nav.cluster_item("a").childCount() > 0 and nav.cluster_item("a").parent() is nav.topLevelItem(0)
+    nav.hide_views("a")
+    nav.set_state("a", "failed")  # a failed connection goes back to Disconnected, with its red dot
+    assert sections() == {"CONNECTED": ["c"], "DISCONNECTED": ["a", "b"]} and nav.state("a") == "failed"
+    nav.set_state("c", "idle")
+    assert sections() == {"CONNECTED": [], "DISCONNECTED": ["a", "b", "c"]}
+
+
+def test_navigator_headers_are_inert_and_menu_actions(qtbot):
+    from PySide6.QtCore import Qt
+
+    from kubeman.ui.navigator import Navigator
+
+    nav = Navigator()
+    qtbot.addWidget(nav)
+    nav.set_contexts(["a"])
+    clicks = []
+    nav.context_clicked.connect(clicks.append)
+    nav.view_requested.connect(lambda *x: clicks.append(x))
+    nav._on_click(nav.topLevelItem(0), 0)  # clicking a section header does nothing
+    assert clicks == [] and not (nav.topLevelItem(0).flags() & Qt.ItemIsSelectable)
+    assert [label for label, _ in nav.actions_for("a")] == ["Connect"]
+    nav.set_state("a", "failed")
+    assert [label for label, _ in nav.actions_for("a")] == ["Connect"]  # retry
+    nav.set_state("a", "connecting")
+    assert [label for label, _ in nav.actions_for("a")] == ["Reconnect", "Disconnect"]  # can cancel while connecting
+    nav.set_state("a", "connected")
+    nav.show_views("a")
+    seen = []
+    nav.disconnect_requested.connect(seen.append)
+    dict(nav.actions_for("a"))["Disconnect"].emit("a")
+    assert seen == ["a"]
+    group = nav.cluster_item("a").child(2)  # right-clicking anywhere under a cluster resolves to that cluster
+    assert nav._cluster_of(group.child(0)) is nav.cluster_item("a") and nav._cluster_of(nav.topLevelItem(0)) is None
+    nav._on_click(group.child(0), 0)
+    assert clicks == [("a", "workloads")]
+
+
+def test_disconnect_reconnect_via_navigator(qtbot):
+    MultiService.instances.clear()
+    win = MainWindow(MultiService)
+    qtbot.addWidget(win)
+    qtbot.waitUntil(lambda: win.nav.cluster_item("a").childCount() > 0, timeout=5000)
+    win.nav.context_clicked.emit("b")
+    qtbot.waitUntil(lambda: win.nav.cluster_item("b").childCount() > 0, timeout=5000)
+    assert win.nav.cluster_item("a").parent() is win.nav.topLevelItem(0) and win.nav.state("bad") == "idle"
+    win.nav.disconnect_requested.emit("b")  # what the right-click menu emits
+    assert list(win.workspaces) == ["a"] and win.nav.state("b") == "idle"
+    assert win.nav.cluster_item("b").parent() is win.nav.topLevelItem(1) and win.nav.cluster_item("b").childCount() == 0
+    old = win.workspace("a")
+    win.nav.reconnect_requested.emit("a")
+    assert win.workspace("a") is not old and list(win.workspaces) == ["a"]
+    qtbot.waitUntil(lambda: win.nav.state("a") == "connected" and win.nav.cluster_item("a").childCount() > 0, timeout=5000)
+    win.nav.connect_requested.emit("b")  # menu "Connect" on a disconnected cluster
+    assert sorted(win.workspaces) == ["a", "b"]
+
+
+def test_disconnect_while_connecting_drops_late_result(qtbot):
+    import threading
+
+    gate = threading.Event()
+
+    class SlowService(MultiService):
+        def connect(self, ctx):
+            gate.wait(5)  # the connection is "in flight" until released
+            super().connect(ctx)
+
+    win = MainWindow(SlowService)
+    qtbot.addWidget(win)
+    assert win.nav.state("a") == "connecting" and win.nav.cluster_item("a").parent() is win.nav.topLevelItem(0)
+    win.nav.disconnect_requested.emit("a")  # cancel while still connecting
+    assert win.workspaces == {} and win.nav.state("a") == "idle"
+    gate.set()
+    qtbot.wait(300)  # the late connect result must be ignored: no resurrected state, no errors
+    assert win.nav.state("a") == "idle" and win.nav.cluster_item("a").childCount() == 0

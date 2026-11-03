@@ -2,7 +2,10 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
 
 class TableModel(QAbstractTableModel):
-    """Rows are dataclasses; columns is a list of (header, attribute) pairs."""
+    """Rows are dataclasses; columns is a list of (header, attribute) or (header, attribute, formatter) tuples.
+
+    The formatter only affects display; sorting uses the raw attribute so numbers sort numerically.
+    """
 
     def __init__(self, columns):
         super().__init__()
@@ -22,9 +25,10 @@ class TableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or role not in (Qt.DisplayRole, Qt.EditRole):
             return None
-        value = getattr(self.rows[index.row()], self.columns[index.column()][1])
+        col = self.columns[index.column()]
+        value = getattr(self.rows[index.row()], col[1])
         if role == Qt.DisplayRole:
-            return str(value)
+            return col[2](value) if len(col) > 2 else str(value)
         if role == Qt.EditRole:  # sort role: keeps ints numeric
             return value
         return None

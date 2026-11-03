@@ -63,7 +63,7 @@ def map_node(n, include_raw=True):
     return NodeRow(
         n.metadata.name, "Ready" if ready == "True" else "NotReady", roles,
         n.status.node_info.kubelet_version if n.status.node_info else "", ip,
-        alloc.get("cpu", ""), alloc.get("memory", ""),
+        float(parse_quantity(alloc.get("cpu", 0))), float(parse_quantity(alloc.get("memory", 0))) / 2**30,
         format_age(n.metadata.creation_timestamp), _raw(n) if include_raw else {},
     )
 
@@ -258,12 +258,12 @@ class KubeService:
         nodes = [map_node(n, include_raw=False) for n in self._iter_list(self._core.list_node)]
         counts = self._overview_pods()
         events, warnings = self._overview_events()
-        cpu = sum(parse_quantity(n.cpu) for n in nodes if n.cpu)
-        mem = sum(parse_quantity(n.memory) for n in nodes if n.memory)
+        cpu = sum(n.cpu for n in nodes)
+        mem = sum(n.memory for n in nodes)
         counts.update({
             "nodes": len(nodes), "nodes_ready": sum(1 for n in nodes if n.status == "Ready"),
             "namespaces": sum(1 for _ in self._iter_list(self._core.list_namespace)),
-            "cpu": f"{float(cpu):g} cores", "memory": f"{float(mem) / 2**30:.1f} GiB",
+            "cpu": f"{cpu:.1f} cores", "memory": f"{mem:.2f} GiB",
             "warnings": warnings,
         })
         return {"counts": counts, "events": events}
