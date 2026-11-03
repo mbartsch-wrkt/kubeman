@@ -20,7 +20,8 @@ def evaluate(target, st, elapsed, timeout):
         return "complete", f"Complete: {ready}/{target} ready in {elapsed:.0f}s"
     if st["deadline_exceeded"]:
         return "failed", f"Failed: rollout exceeded its progress deadline ({ready}/{target} ready)"
-    problem = f"; {len(failing)} failing" if failing else ""
+    terminating = len(st["pods"]) - len(live)
+    problem = (f"; {len(failing)} failing" if failing else "") + (f"; {terminating} still terminating" if terminating else "")
     if elapsed >= timeout:
         return "timeout", f"Timed out after {elapsed:.0f}s: {ready}/{target} ready{problem}"
     if not st["observed"]:

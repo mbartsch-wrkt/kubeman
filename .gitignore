@@ -1,0 +1,3 @@
+.omc/
+.venv/
+.pytest_cache/
