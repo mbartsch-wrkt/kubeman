@@ -32,6 +32,9 @@ class MainWindow(QMainWindow):
         nav_dock.setMinimumWidth(220)
         self.addDockWidget(Qt.LeftDockWidgetArea, nav_dock)
         self.nav.context_clicked.connect(self.open_cluster)
+        self.nav.connect_requested.connect(self.open_cluster)
+        self.nav.disconnect_requested.connect(self._discard)
+        self.nav.reconnect_requested.connect(self.reconnect_cluster)
         self.nav.view_requested.connect(self._open_view)
 
         self.status = self.statusBar()
@@ -60,6 +63,10 @@ class MainWindow(QMainWindow):
         ws.view_opened.connect(lambda key, c=ctx: self._on_view_opened(c, key))
         self.clusters.setCurrentIndex(self.clusters.addTab(ws, ctx))
         ws.start()
+
+    def reconnect_cluster(self, ctx):
+        self._discard(ctx)
+        self.open_cluster(ctx)
 
     def _on_state(self, ctx, state):
         self.nav.set_state(ctx, state)

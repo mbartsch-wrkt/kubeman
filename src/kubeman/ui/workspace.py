@@ -36,6 +36,7 @@ class ClusterWorkspace(QMainWindow):
         self.pool = QThreadPool.globalInstance()
         self._workers = set()
         self._opened_default = False
+        self._closed = False
         self.setWindowFlags(Qt.Widget)
         # side docks span the full height; the log dock sits under the central tabs only
         self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
@@ -102,7 +103,8 @@ class ClusterWorkspace(QMainWindow):
         self.pod_table = T([("Name", "name"), ("Namespace", "namespace"), ("Ready", "ready"), ("Status", "status"),
                             ("Restarts", "restarts"), ("Node", "node"), ("Age", "age")], "Pod")
         self.node_table = T([("Name", "name"), ("Status", "status"), ("Roles", "roles"), ("Version", "version"),
-                             ("IP", "ip"), ("CPU", "cpu"), ("Memory", "memory"), ("Age", "age")], "Node")
+                             ("IP", "ip"), ("CPU (cores)", "cpu", lambda v: f"{v:.1f}"),
+                             ("Memory (GiB)", "memory", lambda v: f"{v:.2f}"), ("Age", "age")], "Node")
         self.rs_table = T([("Name", "name"), ("Namespace", "namespace"), ("Desired", "desired"), ("Current", "current"),
                            ("Ready", "ready"), ("Owner", "owner"), ("Age", "age")], "ReplicaSet")
         self.deploy_table = T([("Name", "name"), ("Namespace", "namespace"), ("Ready", "ready"),
@@ -187,6 +189,7 @@ class ClusterWorkspace(QMainWindow):
 
     def shutdown(self):
         """Stop every log stream; the shell calls this before discarding the workspace."""
+        self._closed = True
         for i in range(self.log_tabs.count()):
             self.log_tabs.widget(i).stop()
 
@@ -198,7 +201,8 @@ class ClusterWorkspace(QMainWindow):
 
         def done(cb, *a):
             self._workers.discard(w)
-            cb(*a)
+            if not self._closed:  # disconnected while this call was in flight: drop the result
+                cb(*a)
 
         w.signals.result.connect(lambda r: done(on_result, r))
         w.signals.error.connect(lambda m: done(on_error or self._on_error, m))

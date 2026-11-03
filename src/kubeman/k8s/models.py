@@ -29,8 +29,8 @@ class NodeRow:
     roles: str
     version: str
     ip: str
-    cpu: str
-    memory: str
+    cpu: float  # allocatable cores
+    memory: float  # allocatable GiB
     age: str
     raw: dict = field(default_factory=dict, repr=False)
 

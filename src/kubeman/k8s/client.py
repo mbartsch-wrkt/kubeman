@@ -61,7 +61,7 @@ def map_node(n):
     return NodeRow(
         n.metadata.name, "Ready" if ready == "True" else "NotReady", roles,
         n.status.node_info.kubelet_version if n.status.node_info else "", ip,
-        alloc.get("cpu", ""), alloc.get("memory", ""),
+        float(parse_quantity(alloc.get("cpu", 0))), float(parse_quantity(alloc.get("memory", 0))) / 2**30,
         format_age(n.metadata.creation_timestamp), _raw(n),
     )
 
@@ -213,12 +213,12 @@ class KubeService:
     def overview_cluster(self):
         nodes, pods, events = self.list_nodes(), self.list_pods(), self.list_resource("events")
         running, pending, failed = pod_buckets(pods)
-        cpu = sum(parse_quantity(n.cpu) for n in nodes if n.cpu)
-        mem = sum(parse_quantity(n.memory) for n in nodes if n.memory)
+        cpu = sum(n.cpu for n in nodes)
+        mem = sum(n.memory for n in nodes)
         counts = {
             "nodes": len(nodes), "nodes_ready": sum(1 for n in nodes if n.status == "Ready"),
-            "namespaces": len(self.list_namespaces()), "cpu": f"{float(cpu):g} cores",
-            "memory": f"{float(mem) / 2**30:.1f} GiB", "pods": len(pods), "running": running,
+            "namespaces": len(self.list_namespaces()), "cpu": f"{cpu:.1f} cores",
+            "memory": f"{mem:.2f} GiB", "pods": len(pods), "running": running,
             "pending": pending, "failed": failed, "warnings": sum(1 for e in events if e.type == "Warning"),
         }
         return {"counts": counts, "events": events[:25]}
