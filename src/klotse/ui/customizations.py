@@ -1,9 +1,12 @@
 import json
+import re
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QCompleter, QDialog, QDialogButtonBox, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
                                QPushButton, QVBoxLayout)
+
+from .settings_store import default_store
 
 
 DEFAULT_LABELS = {"Node": ["karpenter.sh/nodepool"], "Pod": []}
@@ -43,43 +46,102 @@ def parse_label_columns(lines):
 
 
 SECTION = "columns."  # one INI section per resource kind, e.g. [columns.Pod]
-SEP = "|"  # list separator; QSettings quotes values containing , ; or =, so those would make the file noisy
-ARROW = "->"  # label key -> heading inside the file (the dialog still uses "key = heading")
+ARROW = "->"  # the previous format wrote a heading as `key -> heading` (the dialog uses "key = heading")
+LEGACY_SEP = "|"  # the previous file format kept a whole list on one line: `hidden=a | b | c`
 
 
-def _join(items):
-    return f" {SEP} ".join(items)
+def _numbered(store, name):
+    """{index: value} for the keys `name.0`, `name.1`, ... in the current group (empty values are skipped)."""
+    found = {}
+    for key in store.childKeys():
+        match = re.fullmatch(re.escape(name) + r"\.(\d+)", key)
+        if match:
+            value = str(store.value(key, "")).strip()
+            if value:
+                found[int(match[1])] = value
+    return found
 
 
-def _split(text):
-    return [part.strip() for part in str(text).split(SEP) if part.strip()]
+def _read_list(store, name):
+    """Read a list stored as `name.0`, `name.1`, ... in the current group.
+
+    Returns (found, items, old_format). A bare empty `name=` is an explicit empty list; the older single-line
+    `name=a | b | c` form is still understood (old_format=True) so the file can be rewritten.
+    """
+    numbered = _numbered(store, name)
+    if numbered:
+        return True, [value for _, value in sorted(numbered.items())], False
+    bare = store.value(name, None)
+    if bare is None:
+        return False, [], False
+    text = str(bare).strip()
+    if not text:
+        return True, [], False
+    return True, [part.strip() for part in text.split(LEGACY_SEP) if part.strip()], True
+
+
+def _read_labels(store):
+    """Read the label columns as (found, lines, old_format), with lines in the dialog's `key = heading` syntax.
+
+    `labels.N` holds the label key and `labels_name.N` (same N) its optional heading. The previous formats, a
+    heading written as `key -> heading` in the value or a whole list on one line, are still read.
+    """
+    numbered = sorted(_numbered(store, "labels").items())
+    if numbered:
+        names = _numbered(store, "labels_name")
+        lines, old = [], False
+        for index, value in numbered:
+            if ARROW in value:
+                value, old = value.replace(ARROW, "=", 1), True
+            elif index in names:
+                value = f"{value} = {names[index]}"
+            lines.append(value)
+        return True, lines, old
+    found, items, old = _read_list(store, "labels")
+    return found, [item.replace(ARROW, "=", 1) for item in items], old
+
+
+def _write_list(store, name, items, keep_empty=True):
+    """Write items as `name.0`, `name.1`, ...; an empty list is a bare `name=` (so "none" differs from "default")."""
+    for index, item in enumerate(items):
+        store.setValue(f"{name}.{index}", item)
+    if not items and keep_empty:
+        store.setValue(name, "")
 
 
 class LabelSettings(QObject):
-    """Column preferences per resource kind, saved as readable INI sections:
+    """Column preferences per resource kind, saved as readable INI sections, one entry per line:
 
         [columns.Pod]
-        order=name; namespace; ready          built-in column order (omitted = default)
-        hidden=cpu_req; cpu_lim               built-in columns that are hidden (omitted = default)
-        labels=app.kubernetes.io/name = App   label columns, optional "= heading" (omitted = default)
+        order.0=name                            built-in column order (omitted = default order)
+        order.1=namespace
+        hidden.0=cpu_req                        built-in columns that are hidden (omitted = the default set)
+        hidden.1=cpu_lim
+        labels.0=app.kubernetes.io/name         label columns (omitted = the default labels)
+        labels_name.0=App                       optional heading for labels.0
+        labels.1=example.com/team
 
-    An empty value (`hidden=`) means "none", an absent key means "use the default".
-    Files written by earlier versions (JSON under columns/labels and columns/layout) are still read and are
-    rewritten in this format the next time something is saved.
+    A bare empty key (`hidden=`, `labels=`) means "none"; a key that is absent means "use the default".
+    Older files are still read and are rewritten in this format when the app starts: the JSON values under
+    columns/labels and columns/layout, the `a | b | c` single-line lists and `key -> heading` values.
     """
 
     changed = Signal()
 
     def __init__(self, settings=None, parent=None):
         super().__init__(parent)
-        self.store = settings if settings is not None else QSettings(
-            QSettings.IniFormat, QSettings.UserScope, "Kubeman", "Kubeman")
+        self.store = settings if settings is not None else default_store()
         self._labels = {kind: list(keys) for kind, keys in DEFAULT_LABELS.items()}
         self._headers = {}
         self._layout = {}
         self._explicit_labels = set()  # kinds whose label list was chosen by the user (written to the file)
         self._load_sections()
         self._load_legacy()
+        if self._legacy:  # an older file: rewrite it right away so the file on disk is readable
+            try:
+                self._save()
+            except OSError:
+                pass  # read-only settings: keep working from memory; a later save reports the error
 
     # ---- reading ----------------------------------------------------------
     def _load_sections(self):
@@ -89,17 +151,19 @@ class LabelSettings(QObject):
             kind = group[len(SECTION):]
             self.store.beginGroup(group)
             try:
-                order, hidden, labels = (self.store.value(name, None) for name in ("order", "hidden", "labels"))
+                order_found, order, order_old = _read_list(self.store, "order")
+                hidden_found, hidden, hidden_old = _read_list(self.store, "hidden")
+                labels_found, labels, labels_old = _read_labels(self.store)
             finally:
                 self.store.endGroup()
-            if order is not None or hidden is not None:
-                self._layout[kind] = {
-                    "order": _split(order) if order is not None else [],
-                    "hidden": _split(hidden) if hidden is not None else list(DEFAULT_HIDDEN.get(kind, []))}
-            if labels is not None:
+            if order_old or hidden_old or labels_old:
+                self._legacy = True  # an older layout: rewrite it in the current one
+            if order_found or hidden_found:
+                self._layout[kind] = {"order": order,
+                                      "hidden": hidden if hidden_found else list(DEFAULT_HIDDEN.get(kind, []))}
+            if labels_found:
                 try:
-                    keys, headers = parse_label_columns(
-                        [entry.replace(ARROW, "=", 1) for entry in _split(labels)])
+                    keys, headers = parse_label_columns(labels)
                 except ValueError:
                     continue
                 self._labels[kind], self._headers[kind] = keys, headers
@@ -137,7 +201,7 @@ class LabelSettings(QObject):
                 aliases = headers.get(kind, {}) if isinstance(headers, dict) else {}
                 if isinstance(aliases, dict):
                     self._headers[kind] = {
-                        key: title.strip().replace(SEP, "/") for key, title in aliases.items()
+                        key: title.strip() for key, title in aliases.items()
                         if key in self._labels[kind] and isinstance(title, str) and title.strip()
                         and "\n" not in title and "\r" not in title}
 
@@ -166,8 +230,6 @@ class LabelSettings(QObject):
         for title in aliases.values():
             if not isinstance(title, str) or "\n" in title or "\r" in title:
                 raise ValueError("Column headings must be single-line text.")
-            if SEP in title:
-                raise ValueError(f"Column headings cannot contain '{SEP}'.")
         updated_headers = {key: title.strip() for key, title in aliases.items() if key in keys and title.strip()}
         self._save(labels={**self._labels, kind: keys}, headers={**self._headers, kind: updated_headers},
                    explicit=self._explicit_labels | {kind})
@@ -190,12 +252,15 @@ class LabelSettings(QObject):
         for kind in sorted(set(layout) | explicit):
             self.store.beginGroup(SECTION + kind)
             if kind in layout:
-                self.store.setValue("order", _join(layout[kind].get("order", [])))
-                self.store.setValue("hidden", _join(layout[kind].get("hidden", [])))
+                _write_list(self.store, "order", layout[kind].get("order", []), keep_empty=False)  # none = default
+                _write_list(self.store, "hidden", layout[kind].get("hidden", []))
             if kind in explicit:
                 titles = headers.get(kind, {})
-                self.store.setValue("labels", _join(
-                    f"{key} {ARROW} {titles[key]}" if key in titles else key for key in labels.get(kind, [])))
+                keys = labels.get(kind, [])
+                _write_list(self.store, "labels", keys)
+                for index, key in enumerate(keys):
+                    if key in titles:
+                        self.store.setValue(f"labels_name.{index}", titles[key])
             self.store.endGroup()
         self.store.sync()
         if self.store.status() != QSettings.NoError:
