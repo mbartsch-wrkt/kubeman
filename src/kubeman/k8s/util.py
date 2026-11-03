@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 from kubernetes import client
 
 
+# Serialization is stateless; do not construct a connection pool for every row.
+_serializer = client.ApiClient()
+
+
 def format_age(ts, now=None):
     if ts is None:
         return ""
@@ -14,4 +18,4 @@ def format_age(ts, now=None):
 
 
 def to_dict(obj):
-    return client.ApiClient().sanitize_for_serialization(obj)
+    return _serializer.sanitize_for_serialization(obj)

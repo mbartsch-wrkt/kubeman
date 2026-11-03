@@ -1,9 +1,11 @@
+from heapq import nlargest
+
 from kubernetes import client, config
 from kubernetes.utils import parse_quantity
 from urllib3.exceptions import MaxRetryError
 
 from .models import DeploymentRow, NamespaceRow, NodeRow, PodRow, ReplicaSetRow, StatefulSetRow
-from .resources import SPEC_BY_KEY, SPEC_BY_KIND
+from .resources import MIN_TS, SPEC_BY_KEY, SPEC_BY_KIND
 from .util import format_age, to_dict as _raw  # format_age is re-exported for callers/tests
 
 
@@ -33,7 +35,7 @@ def map_namespace(ns):
     return NamespaceRow(ns.metadata.name, ns.status.phase or "", format_age(ns.metadata.creation_timestamp), labels, _raw(ns))
 
 
-def map_pod(p):
+def map_pod(p, include_raw=True):
     statuses = p.status.container_statuses or []
     ready = sum(1 for c in statuses if c.ready)
     total = len(p.spec.containers or [])
@@ -48,11 +50,11 @@ def map_pod(p):
     return PodRow(
         p.metadata.name, p.metadata.namespace, f"{ready}/{total}", status,
         sum(c.restart_count for c in statuses), p.spec.node_name or "",
-        format_age(p.metadata.creation_timestamp), _raw(p),
+        format_age(p.metadata.creation_timestamp), _raw(p) if include_raw else {},
     )
 
 
-def map_node(n):
+def map_node(n, include_raw=True):
     labels = n.metadata.labels or {}
     roles = ",".join(sorted(k.split("/", 1)[1] for k in labels if k.startswith("node-role.kubernetes.io/"))) or "<none>"
     ready = next((c.status for c in n.status.conditions or [] if c.type == "Ready"), "Unknown")
@@ -62,7 +64,7 @@ def map_node(n):
         n.metadata.name, "Ready" if ready == "True" else "NotReady", roles,
         n.status.node_info.kubelet_version if n.status.node_info else "", ip,
         float(parse_quantity(alloc.get("cpu", 0))), float(parse_quantity(alloc.get("memory", 0))) / 2**30,
-        format_age(n.metadata.creation_timestamp), _raw(n),
+        format_age(n.metadata.creation_timestamp), _raw(n) if include_raw else {},
     )
 
 
@@ -110,6 +112,9 @@ class KubeService:
         config.load_kube_config(context=context, client_configuration=cfg)
         cfg.retries = 1  # the default (3 retries with backoff) makes a dead cluster take ~9s to report
         api = client.ApiClient(cfg)
+        # Pod manifests (especially managedFields) can make list responses huge.
+        # urllib3 decodes gzip automatically, but does not request it by default.
+        api.set_default_header("Accept-Encoding", "gzip")
         core = client.CoreV1Api(api)
         try:
             core.get_api_resources(_request_timeout=10)  # fail fast on bad creds/unreachable
@@ -167,20 +172,32 @@ class KubeService:
     def delete_pod(self, name, namespace):
         self._core.delete_namespaced_pod(name, namespace)
 
+    @staticmethod
+    def _iter_list(fn, *args, **kwargs):
+        """Bound each API response and release each page before fetching the next."""
+        token = None
+        while True:
+            page = fn(*args, limit=500, _continue=token, _request_timeout=30, **kwargs)
+            yield from page.items
+            token = page.metadata._continue if page.metadata else None
+            del page
+            if not token:
+                break
+
     def list_namespaces(self):
-        return [map_namespace(n) for n in self._core.list_namespace(_request_timeout=30).items]
+        return [map_namespace(n) for n in self._iter_list(self._core.list_namespace)]
 
     def list_pods(self, namespace=None):
         api = self._core
-        items = (api.list_namespaced_pod(namespace, _request_timeout=30) if namespace
-                 else api.list_pod_for_all_namespaces(_request_timeout=30)).items
+        items = (self._iter_list(api.list_namespaced_pod, namespace) if namespace
+                 else self._iter_list(api.list_pod_for_all_namespaces))
         return [map_pod(p) for p in items]
 
     def list_nodes(self):
-        return [map_node(n) for n in self._core.list_node(_request_timeout=30).items]
+        return [map_node(n) for n in self._iter_list(self._core.list_node)]
 
     def _list_apps(self, all_fn, ns_fn, mapper, namespace):
-        items = (ns_fn(namespace, _request_timeout=30) if namespace else all_fn(_request_timeout=30)).items
+        items = self._iter_list(ns_fn, namespace) if namespace else self._iter_list(all_fn)
         return [mapper(i) for i in items]
 
     def list_replicasets(self, namespace=None):
@@ -198,44 +215,77 @@ class KubeService:
     def list_resource(self, key, namespace=None):
         """Generic list for the specs in resources.py; events come back newest first."""
         spec = SPEC_BY_KEY[key]
-        api = self._apis[spec.api]
-        if not spec.namespaced:
-            items = getattr(api, f"list_{spec.snake}")(_request_timeout=30).items
-        elif namespace:
-            items = getattr(api, f"list_namespaced_{spec.snake}")(namespace, _request_timeout=30).items
-        else:
-            items = getattr(api, f"list_{spec.snake}_for_all_namespaces")(_request_timeout=30).items
-        rows = [spec.mapper(i) for i in items]
+        rows = [spec.mapper(i) for i in self._resource_items(key, namespace)]
         if key == "events":
             rows.sort(key=lambda r: r.ts, reverse=True)
         return rows
 
+    def _resource_items(self, key, namespace=None):
+        spec = SPEC_BY_KEY[key]
+        api = self._apis[spec.api]
+        if not spec.namespaced:
+            return self._iter_list(getattr(api, f"list_{spec.snake}"))
+        if namespace:
+            return self._iter_list(getattr(api, f"list_namespaced_{spec.snake}"), namespace)
+        return self._iter_list(getattr(api, f"list_{spec.snake}_for_all_namespaces"))
+
+    def _overview_events(self, namespace=None):
+        warnings = 0
+
+        def events():
+            nonlocal warnings
+            for event in self._resource_items("events", namespace):
+                warnings += event.type == "Warning"
+                yield event
+
+        recent = nlargest(25, events(), key=lambda e: (
+            e.last_timestamp or e.event_time or e.metadata.creation_timestamp or MIN_TS))
+        return [SPEC_BY_KEY["events"].mapper(e) for e in recent], warnings
+
+    def _overview_pods(self, namespace=None):
+        api = self._core
+        items = (self._iter_list(api.list_namespaced_pod, namespace) if namespace
+                 else self._iter_list(api.list_pod_for_all_namespaces))
+        total = 0
+
+        def rows():
+            nonlocal total
+            for pod in items:
+                total += 1
+                yield map_pod(pod, include_raw=False)
+
+        running, pending, failed = pod_buckets(rows())
+        return {"pods": total, "running": running, "pending": pending, "failed": failed}
+
     def overview_cluster(self):
-        nodes, pods, events = self.list_nodes(), self.list_pods(), self.list_resource("events")
-        running, pending, failed = pod_buckets(pods)
+        nodes = [map_node(n, include_raw=False) for n in self._iter_list(self._core.list_node)]
+        counts = self._overview_pods()
+        events, warnings = self._overview_events()
         cpu = sum(n.cpu for n in nodes)
         mem = sum(n.memory for n in nodes)
-        counts = {
+        counts.update({
             "nodes": len(nodes), "nodes_ready": sum(1 for n in nodes if n.status == "Ready"),
-            "namespaces": len(self.list_namespaces()), "cpu": f"{cpu:.1f} cores",
-            "memory": f"{mem:.2f} GiB", "pods": len(pods), "running": running,
-            "pending": pending, "failed": failed, "warnings": sum(1 for e in events if e.type == "Warning"),
-        }
-        return {"counts": counts, "events": events[:25]}
+            "namespaces": sum(1 for _ in self._iter_list(self._core.list_namespace)),
+            "cpu": f"{cpu:.1f} cores", "memory": f"{mem:.2f} GiB",
+            "warnings": warnings,
+        })
+        return {"counts": counts, "events": events}
 
     def overview_workloads(self, namespace=None):
-        pods = self.list_pods(namespace)
-        events = self.list_resource("events", namespace)
-        running, pending, failed = pod_buckets(pods)
-        counts = {
-            "pods": len(pods), "running": running, "pending": pending, "failed": failed,
-            "deployments": len(self.list_deployments(namespace)), "replicasets": len(self.list_replicasets(namespace)),
-            "statefulsets": len(self.list_statefulsets(namespace)),
-            "daemonsets": len(self.list_resource("daemonsets", namespace)),
-            "jobs": len(self.list_resource("jobs", namespace)), "cronjobs": len(self.list_resource("cronjobs", namespace)),
-            "warnings": sum(1 for e in events if e.type == "Warning"),
-        }
-        return {"counts": counts, "events": events[:25]}
+        counts = self._overview_pods(namespace)
+        events, warnings = self._overview_events(namespace)
+        apps = self._apps
+        for key, all_fn, ns_fn in (
+            ("deployments", apps.list_deployment_for_all_namespaces, apps.list_namespaced_deployment),
+            ("replicasets", apps.list_replica_set_for_all_namespaces, apps.list_namespaced_replica_set),
+            ("statefulsets", apps.list_stateful_set_for_all_namespaces, apps.list_namespaced_stateful_set),
+        ):
+            items = self._iter_list(ns_fn, namespace) if namespace else self._iter_list(all_fn)
+            counts[key] = sum(1 for _ in items)
+        for key in ("daemonsets", "jobs", "cronjobs"):
+            counts[key] = sum(1 for _ in self._resource_items(key, namespace))
+        counts["warnings"] = warnings
+        return {"counts": counts, "events": events}
 
     def scale_status(self, kind, name, namespace):
         """Snapshot used by the scale monitor: replica counts, per-pod state with failure reasons, warnings."""

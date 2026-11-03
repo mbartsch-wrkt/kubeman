@@ -23,7 +23,7 @@ class TableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.columns)
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
+        if not index.isValid() or role not in (Qt.DisplayRole, Qt.EditRole):
             return None
         col = self.columns[index.column()]
         value = getattr(self.rows[index.row()], col[1])

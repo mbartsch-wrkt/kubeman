@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QComboBox, QDockWidget, QInputDialog, QLabel, QMainWindow, QMessageBox,
@@ -35,8 +37,11 @@ class ClusterWorkspace(QMainWindow):
         self.context = context
         self.pool = QThreadPool.globalInstance()
         self._workers = set()
-        self._opened_default = False
+        self._loads = {}  # view -> latest requested namespace
+        self._loading = set()
+        self._pending_loads = set()
         self._closed = False
+        self._opened_default = False
         self.setWindowFlags(Qt.Widget)
         # side docks span the full height; the log dock sits under the central tabs only
         self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
@@ -161,11 +166,42 @@ class ClusterWorkspace(QMainWindow):
         return [self.tabs.widget(i).view_key for i in range(self.tabs.count())]
 
     def load_view(self, key):
+        if self._closed:
+            return
         fetch, scoped, sink = self.loaders[key]
         ns = self.ns_combo.currentText()
+        namespace = None if (not scoped or ns == ALL_NS) else ns
+        self._loads[key] = namespace
+        if key in self._loading:
+            self._pending_loads.add(key)
+            return
+        self._loading.add(key)
         title = self.views[key][1]
-        self._run(fetch, sink, None if (not scoped or ns == ALL_NS) else ns,
-                  on_error=lambda m: self.message.emit(f"{self.context} / {title}: {m}"))
+        widget = self.views[key][0]
+        table = widget if isinstance(widget, ResourceTable) else None
+        if table is not None:
+            table.set_loading()
+        started = perf_counter()
+        self.message.emit(f"{self.context} / {title}: Loading…")
+
+        def finished(data, error=False):
+            self._loading.discard(key)
+            if self._closed:
+                return
+            if self._loads[key] == namespace:
+                if error:
+                    if table is not None:
+                        table.set_error(data)
+                    self.message.emit(f"{self.context} / {title}: {data}")
+                else:
+                    sink(data)
+                    count = f"{len(data):,} rows, " if isinstance(data, list) else ""
+                    self.message.emit(f"{self.context} / {title}: {count}{perf_counter() - started:.1f}s")
+            if key in self._pending_loads:
+                self._pending_loads.discard(key)
+                self.load_view(key)
+
+        self._run(fetch, finished, namespace, on_error=lambda m: finished(m, error=True))
 
     def open_logs(self, row, containers):
         key = (row.namespace, row.name)
@@ -190,6 +226,7 @@ class ClusterWorkspace(QMainWindow):
     def shutdown(self):
         """Stop every log stream; the shell calls this before discarding the workspace."""
         self._closed = True
+        self._pending_loads.clear()
         for i in range(self.log_tabs.count()):
             self.log_tabs.widget(i).stop()
 
