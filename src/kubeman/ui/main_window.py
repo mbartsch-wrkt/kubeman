@@ -1,6 +1,9 @@
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QMessageBox, QTabWidget
+from PySide6.QtCore import QThreadPool, Qt, Signal
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import (QDockWidget, QMainWindow, QMessageBox, QSizePolicy,
+                               QTabWidget, QToolBar, QToolButton, QWidget)
 
+from .customizations import LabelColumnsDialog, LabelSettings
 from .log_view import shutdown_all
 from .navigator import Navigator
 from .workspace import ClusterWorkspace
@@ -12,12 +15,36 @@ class MainWindow(QMainWindow):
     `service_factory` is called once per cluster so every workspace gets its own connection.
     """
 
-    def __init__(self, service_factory):
+    closing = Signal()
+
+    def __init__(self, service_factory, label_settings=None):
         super().__init__()
         self.factory = service_factory
         self.workspaces = {}  # context name -> ClusterWorkspace
+        self.label_settings = label_settings if label_settings is not None else LabelSettings(parent=self)
         self.setWindowTitle("Kubeman")
         self.resize(1500, 850)
+        self._shutting_down = False
+        self.exit_action = QAction("Exit", self)
+        self.exit_action.setShortcut(QKeySequence.Quit)
+        self.exit_action.setMenuRole(QAction.QuitRole)
+        self.exit_action.triggered.connect(self.close)
+        self.menuBar().addMenu("File").addAction(self.exit_action)
+        self.customizations_menu = self.menuBar().addMenu("Customizations")
+        for kind in ("Node", "Pod"):
+            self.customizations_menu.addAction(f"{kind} label columns…", lambda checked=False, k=kind: self.customize_labels(k))
+        self.exit_toolbar = QToolBar("Application", self)
+        self.exit_toolbar.setMovable(False)
+        self.exit_toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.customizations_button = QToolButton(text="Customizations")
+        self.customizations_button.setPopupMode(QToolButton.InstantPopup)
+        self.customizations_button.setMenu(self.customizations_menu)
+        self.exit_toolbar.addWidget(self.customizations_button)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.exit_toolbar.addWidget(spacer)
+        self.exit_toolbar.addAction(self.exit_action)
+        self.addToolBar(self.exit_toolbar)
 
         self.clusters = QTabWidget()
         self.clusters.setTabsClosable(True)
@@ -55,7 +82,7 @@ class MainWindow(QMainWindow):
         if ctx in self.workspaces:
             self.clusters.setCurrentWidget(self.workspaces[ctx])
             return
-        ws = ClusterWorkspace(self.factory(), ctx)
+        ws = ClusterWorkspace(self.factory(), ctx, label_settings=self.label_settings)
         self.workspaces[ctx] = ws
         ws.message.connect(self.status.showMessage)
         ws.state.connect(lambda s, c=ctx: self._on_state(c, s))
@@ -63,6 +90,18 @@ class MainWindow(QMainWindow):
         ws.view_opened.connect(lambda key, c=ctx: self._on_view_opened(c, key))
         self.clusters.setCurrentIndex(self.clusters.addTab(ws, ctx))
         ws.start()
+
+    def customize_labels(self, kind):
+        available = set()
+        for workspace in self.workspaces.values():
+            for table in workspace.resource_tables():
+                if table.kind == kind:
+                    for row in table.model.rows:
+                        metadata = (row.raw or {}).get("metadata") or {}
+                        available.update((metadata.get("labels") or {}).keys())
+        dialog = LabelColumnsDialog(kind, self.label_settings, available, self)
+        dialog.exec()
+        dialog.deleteLater()
 
     def reconnect_cluster(self, ctx):
         self._discard(ctx)
@@ -114,8 +153,16 @@ class MainWindow(QMainWindow):
         else:
             self.nav.select_cluster(ws.context)
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        self.closing.emit()
         for ws in self.workspaces.values():
             ws.shutdown()
+        QThreadPool.globalInstance().clear()
         shutdown_all()
+
+    def closeEvent(self, event):
+        self.shutdown()
         super().closeEvent(event)

@@ -2,6 +2,8 @@ import yaml
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMessageBox, QPlainTextEdit, QVBoxLayout
 
+from .manifest import dump_manifest
+
 
 class EditDialog(QDialog):
     """Edit a resource as YAML; `result_body` holds the parsed manifest after Save."""
@@ -11,7 +13,7 @@ class EditDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(800, 600)
         self.result_body = None
-        self.editor = QPlainTextEdit(yaml.safe_dump(raw, sort_keys=False))
+        self.editor = QPlainTextEdit(dump_manifest(raw))
         self.editor.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)

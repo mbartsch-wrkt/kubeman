@@ -67,13 +67,15 @@ def shutdown_all(timeout_ms=2000):
 
 
 class LogView(QWidget):
-    def __init__(self, service, namespace, pod, containers, parent=None):
+    def __init__(self, service, namespace, pod, containers, parent=None, initial_container=None):
         super().__init__(parent)
         self.service, self.namespace, self.pod = service, namespace, pod
         self._streamer = None
 
         self.container = QComboBox()
         self.container.addItems(containers)
+        if initial_container:
+            self.container.setCurrentText(initial_container)
         self.follow = QCheckBox("Follow")
         self.follow.setChecked(True)
         self.tail = QSpinBox()

@@ -2,19 +2,23 @@ from time import perf_counter
 
 from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDockWidget, QInputDialog, QLabel, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDockWidget, QInputDialog, QLabel, QMainWindow, QMessageBox,
                                QTabWidget, QToolBar)
 
 from ..k8s.resources import SPECS
 from ..workers import Worker
+from .command_view import CommandView
+from .container_dialog import ContainerDialog, pod_containers
+from .customizations import LabelSettings
 from .detail_panel import DetailPanel
 from .edit_dialog import EditDialog
 from .log_view import LogView
 from .namespace_dialog import NamespaceDialog
+from .node_dialogs import DrainDialog, NodeShellDialog
 from .overview import CLUSTER_CARDS, POD_COLUMNS, WORKLOAD_CARDS, OverviewView
 from .resource_table import ResourceTable
 from .scale_monitor import ScaleMonitor
-from .terminal import kubectl_args, open_terminal
+from .terminal import kubectl_args, node_shell_args, open_terminal
 
 ALL_NS = "All namespaces"
 KIND_VIEW = {"Deployment": "deployments", "ReplicaSet": "replicasets", "StatefulSet": "statefulsets"}
@@ -31,10 +35,11 @@ class ClusterWorkspace(QMainWindow):
     failed = Signal(str)  # connection error text; the shell closes this workspace
     view_opened = Signal(str)  # view key now showing, so the navigator can follow
 
-    def __init__(self, service, context, parent=None):
+    def __init__(self, service, context, parent=None, label_settings=None):
         super().__init__(parent)
         self.service = service
         self.context = context
+        self.label_settings = label_settings if label_settings is not None else LabelSettings(parent=self)
         self.pool = QThreadPool.globalInstance()
         self._workers = set()
         self._loads = {}  # view -> latest requested namespace
@@ -48,6 +53,8 @@ class ClusterWorkspace(QMainWindow):
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
 
         self._build_views()
+        self.apply_label_columns()
+        self.label_settings.changed.connect(self.apply_label_columns)
 
         # central: closable tabs, one per opened view (the widgets persist when a tab is closed)
         self.tabs = QTabWidget()
@@ -83,7 +90,7 @@ class ClusterWorkspace(QMainWindow):
             if isinstance(widget, ResourceTable):
                 widget.edit_requested.connect(self.edit_resource)
                 widget.scale_requested.connect(self.scale_resource)
-                widget.action_requested.connect(self.pod_action)
+                widget.action_requested.connect(self.node_action if widget.kind == "Node" else self.pod_action)
         self.ns_table.new_requested.connect(self.new_namespace)
 
         bar = QToolBar()
@@ -110,7 +117,7 @@ class ClusterWorkspace(QMainWindow):
         self.ns_table = T([("Name", "name"), ("Status", "status"), ("Age", "age"), ("Labels", "labels")], "Namespace")
         self.pod_table = T(POD_COLUMNS, "Pod")
         self.node_table = T([("Name", "name"), ("Status", "status"), ("Roles", "roles"), ("Version", "version"),
-                             ("IP", "ip"), ("CPU (cores)", "cpu", lambda v: f"{v:.1f}"),
+                           ("IP", "ip"), ("CPU (cores)", "cpu", lambda v: f"{v:.1f}"),
                              ("Memory (GiB)", "memory", lambda v: f"{v:.2f}"), ("Age", "age")], "Node")
         self.rs_table = T([("Name", "name"), ("Namespace", "namespace"), ("Desired", "desired"), ("Current", "current"),
                            ("Ready", "ready"), ("Owner", "owner"), ("Age", "age")], "ReplicaSet")
@@ -146,6 +153,14 @@ class ClusterWorkspace(QMainWindow):
             self.loaders[spec.key] = (lambda ns, k=spec.key: svc().list_resource(k, ns), spec.namespaced, table.set_rows)
         for key, (widget, _) in self.views.items():
             widget.view_key = key
+
+    def resource_tables(self):
+        for widget, _ in self.views.values():
+            yield from widget.tables() if isinstance(widget, OverviewView) else [widget]
+
+    def apply_label_columns(self):
+        for table in self.resource_tables():
+            table.set_label_columns(self.label_settings.labels(table.kind), self.label_settings.headers(table.kind))
 
     # ---- views / tabs -------------------------------------------------
     def _show_view(self, key):
@@ -205,16 +220,17 @@ class ClusterWorkspace(QMainWindow):
 
         self._run(fetch, finished, namespace, on_error=lambda m: finished(m, error=True))
 
-    def open_logs(self, row, containers):
-        key = (row.namespace, row.name)
+    def open_logs(self, row, containers, container=None):
+        key = (row.namespace, row.name, container) if container else (row.namespace, row.name)
         for i in range(self.log_tabs.count()):
             if getattr(self.log_tabs.widget(i), "key", None) == key:
                 self.log_tabs.setCurrentIndex(i)
                 break
         else:
-            view = LogView(self.service, row.namespace, row.name, containers)
+            view = LogView(self.service, row.namespace, row.name, containers, initial_container=container)
             view.key = key
-            self.log_tabs.setCurrentIndex(self.log_tabs.addTab(view, f"Logs: {row.name}"))
+            title = f"Logs: {row.name}/{container}" if container else f"Logs: {row.name}"
+            self.log_tabs.setCurrentIndex(self.log_tabs.addTab(view, title))
         self.log_dock.show()
 
     def _close_log_tab(self, index):
@@ -301,16 +317,107 @@ class ClusterWorkspace(QMainWindow):
         self.message.emit(f"{kind} {name}: {text}")
         self.refresh()
 
+    def node_action(self, action, row):
+        if action == "node-pods":
+            self.open_node_pods(row.name)
+        elif action in ("cordon", "uncordon"):
+            verb = "Cordon" if action == "cordon" else "Uncordon"
+            effect = "Prevent new pods from scheduling here." if action == "cordon" else "Allow new pods to schedule here."
+            if QMessageBox.question(self, f"{verb} node",
+                                    f"Cluster: {self.context}\n{verb} node {row.name}?\n{effect}",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            self.message.emit(f"{verb} node {row.name}…")
+            self._run(self.service.cordon_node, lambda _: self._node_changed(row.name, verb + " completed"),
+                      row.name, action == "cordon")
+        elif action in ("delete-node", "force-delete-node"):
+            force = action == "force-delete-node"
+            verb = "Force delete" if force else "Delete"
+            warning = "Force uses zero grace period; finalizers still apply.\n" if force else ""
+            name, ok = QInputDialog.getText(self, "Delete node",
+                f"Cluster: {self.context}\n{verb} Kubernetes Node {row.name}?\n"
+                "Drain the node first. This does not terminate the underlying machine; "
+                f"a running kubelet may register it again.\n{warning}Type the node name to confirm:")
+            if not ok or name != row.name:
+                return
+            uid = (row.raw.get("metadata") or {}).get("uid")
+            if not uid:
+                self._on_error("Node UID is missing. Refresh the Nodes view before deleting.")
+                return
+            self.message.emit(f"Deleting node {row.name}…")
+            args = (row.name, uid, True) if force else (row.name, uid)
+            self._run(self.service.delete_node, lambda _: self._node_changed(row.name, "Deleted"), *args)
+        elif action == "drain":
+            # Focus an already running drain instead of starting a second one.
+            for i in range(self.log_tabs.count()):
+                existing = self.log_tabs.widget(i)
+                if getattr(existing, "key", None) == ("drain", row.name) and not existing._done:
+                    self.log_tabs.setCurrentIndex(i)
+                    self.log_dock.show()
+                    return
+            dialog = DrainDialog(self.context, row.name, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            view = CommandView(dialog.command())
+            view.key = ("drain", row.name)
+            view.completed.connect(lambda success: self._node_changed(
+                row.name, "Drain completed" if success else "Drain failed or stopped; see activity"))
+            self.log_tabs.setCurrentIndex(self.log_tabs.addTab(view, f"Drain: {row.name}"))
+            self.log_dock.show()
+            self.message.emit(f"Draining node {row.name}…")
+            view.start()
+        elif action == "node-shell":
+            info = (row.raw.get("status") or {}).get("nodeInfo") or {}
+            if info.get("operatingSystem") == "windows":
+                self._on_error("nsenter requires a Linux node.")
+                return
+            dialog = NodeShellDialog(self.context, row.name, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            argv = node_shell_args(self.context, row.name, dialog.namespace.text().strip(), dialog.image.text().strip())
+            self._run(open_terminal, lambda _: self.message.emit(f"Opened node shell: {row.name}"), argv)
+
+    def _node_changed(self, name, message):
+        if self._closed:
+            return
+        self.message.emit(f"{self.context} / {name}: {message}")
+        self.refresh()
+
+    def open_node_pods(self, node):
+        key = f"node-pods:{node}"
+        if key not in self.views:
+            table = ResourceTable(POD_COLUMNS, "Pod")
+            table.set_label_columns(self.label_settings.labels("Pod"), self.label_settings.headers("Pod"))
+            table.view_key = key
+            table.filter.setPlaceholderText(f"Filter pods on {node} (all namespaces)…")
+            table.selected.connect(self.detail.show_row)
+            table.edit_requested.connect(self.edit_resource)
+            table.action_requested.connect(self.pod_action)
+            self.views[key] = (table, f"Pods: {node} (all namespaces)")
+            self.loaders[key] = (lambda _: self.service.list_node_pods(node), False, table.set_rows)
+        self.open_view(key)
+
     def pod_action(self, action, row):
-        if action == "terminate":
-            ok = QMessageBox.question(self, "Terminate pod", f"Delete pod {row.namespace}/{row.name}? "
-                                      "Controller-managed pods will be recreated.")
+        if action == "containers":
+            dialog = ContainerDialog(self.context, row, self)
+            dialog.action_requested.connect(lambda a, c: self._container_action(a, row, c))
+            dialog.exec()
+            return
+        if action in ("terminate", "force-terminate"):
+            force = action == "force-terminate"
+            verb = "Force delete" if force else "Delete"
+            warning = ("\nForce removes the pod with zero grace period. Its processes may keep running "
+                       "until the kubelet catches up; finalizers still apply.") if force else ""
+            ok = QMessageBox.question(self, "Terminate pod", f"Cluster: {self.context}\n{verb} pod {row.namespace}/{row.name}? "
+                                      f"Controller-managed pods will be recreated.{warning}",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if ok != QMessageBox.Yes:
                 return
             self.message.emit(f"Terminating {row.name}…")
-            self._run(self.service.delete_pod, lambda _: self._saved("Pod", row.name), row.name, row.namespace)
+            args = (row.name, row.namespace, True) if force else (row.name, row.namespace)
+            self._run(self.service.delete_pod, lambda _: self._saved("Pod", row.name), *args)
             return
-        containers = [c["name"] for c in (row.raw.get("spec") or {}).get("containers", [])]
+        containers = [c[0] for c in pod_containers(row.raw)]
         if action == "logs":
             self.open_logs(row, containers)
             return
@@ -324,6 +431,13 @@ class ClusterWorkspace(QMainWindow):
             open_terminal(argv)
         except Exception as e:
             self._on_error(f"{type(e).__name__}: {e}")
+
+    def _container_action(self, action, row, container):
+        if action == "logs":
+            self.open_logs(row, [c[0] for c in pod_containers(row.raw)], container)
+        else:
+            argv = kubectl_args(action, self.context, row.namespace, row.name, container)
+            self._run(open_terminal, lambda _: self.message.emit(f"Opened {action}: {row.name}/{container}"), argv)
 
     def new_namespace(self):
         dlg = NamespaceDialog(self)
