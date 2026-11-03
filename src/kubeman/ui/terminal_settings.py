@@ -28,6 +28,7 @@ class TerminalSettingsDialog(QDialog):
         self.setWindowTitle("Terminal settings")
         form = QFormLayout(self)
         hint = QLabel("Choose the macOS app for pod shells, attach sessions and node shells.\n"
+                      "Successful sessions close automatically. Errors stay visible until Enter is pressed.\n"
                       "iTerm2 must be installed. Saved for all clusters and future sessions.")
         hint.setWordWrap(True)
         form.addRow(hint)

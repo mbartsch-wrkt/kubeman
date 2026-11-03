@@ -1,5 +1,7 @@
+import json
 import shlex
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -60,7 +62,11 @@ def test_macos_terminal_quoting_and_failure(monkeypatch, app):
     assert command[:2] == ["osascript", "-e"]
     assert f'tell application "{app}"' in command[2]
     assert argv[2] not in command[2]
-    assert shlex.split(command[3]) == argv
+    wrapper = shlex.split(command[3])
+    assert wrapper[:2] == ["exec", sys.executable]
+    assert wrapper[2].endswith("terminal_session.py")
+    assert wrapper[3] == app
+    assert json.loads(wrapper[4]) == argv
     assert calls[0][1]["timeout"] == 15
 
     def fail(*args, **kwargs):
@@ -68,6 +74,28 @@ def test_macos_terminal_quoting_and_failure(monkeypatch, app):
     monkeypatch.setattr(terminal.subprocess, "run", fail)
     with pytest.raises(RuntimeError, match=f"Could not open {app}: Automation denied"):
         terminal.open_terminal(argv, app)
+
+
+@pytest.mark.parametrize("status", [0, 7])
+def test_mac_session_success_closes_and_failure_waits_for_acknowledgement(monkeypatch, capsys, status):
+    from kubeman.ui import terminal_session
+    calls = []
+    monkeypatch.setattr(terminal_session.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr(terminal_session.subprocess, "call", lambda argv: status)
+    def acknowledge():
+        assert not calls  # Keep the failed session open until the user presses Enter.
+        return ""
+    monkeypatch.setattr("builtins.input", acknowledge)
+    assert terminal_session.run_session(["kubectl", "attach", "pod"], "Terminal",
+                                        ["window-id", "/dev/tty-test"]) == status
+    command = calls[0][0][0]
+    assert command[-2:] == ["window-id", "/dev/tty-test"]
+    assert command[2] == terminal_session.TERMINAL_CLOSE_SCRIPT
+    assert calls[0][1]["start_new_session"] is True
+    if status == 0:
+        assert "Press Enter" not in capsys.readouterr().out
+    else:
+        assert "status 7. Press Enter to close" in capsys.readouterr().out
 
 
 def test_preference_shared_with_existing_and_future_workspaces(qtbot, tmp_path, monkeypatch):

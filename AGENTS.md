@@ -76,6 +76,7 @@ Cluster access comes from kubeconfig and its existing authentication helpers. `k
 | `src/kubeman/ui/command_view.py` | QProcess-backed drain output, completion/error reporting, and local process cancellation. |
 | `src/kubeman/ui/terminal.py` | Explicit-context kubectl argv and platform-specific terminal launching. |
 | `src/kubeman/ui/terminal_settings.py` | Saved macOS terminal preference and its settings dialog. |
+| `src/kubeman/ui/terminal_session.py` | Standalone macOS session runner and targeted cleanup after successful commands. |
 | `src/kubeman/ui/customizations.py` | Persistent Node/Pod label-column lists, custom headings, and settings dialog. |
 | `src/kubeman/ui/scale_monitor.py` | Polling scale progress, readiness/failure evaluation, timeouts, and activity display. |
 | `src/kubeman/ui/watcher.py` | `ChangeWatcher` QThread: runs `KubeService.watch_changes` and emits `changed`; `stop()` only sets a flag and never blocks the GUI thread. |
@@ -169,6 +170,7 @@ example.com/team = Team
 - Logs, Shell, and Attach must target the selected container, cluster context, namespace, and pod. Container-specific log tabs preserve the initial container selection.
 - Commands use explicit `--context`; do not rely on the shell's active kubeconfig context.
 - Windows terminals use `cmd /k` in a new console. macOS uses Terminal by default or the saved iTerm2 choice via osascript; both pass the quoted command as an AppleScript argument. Linux searches x-terminal-emulator, gnome-terminal, konsole, then xterm. All terminal opening runs in a worker; macOS automation errors are surfaced with their stderr.
+- Successful macOS commands exit the local shell and close their session using a detached closer, even if the terminal profile keeps exited sessions open. iTerm2 cleanup matches the created window ID and unique session ID; moving the session into another window leaves it open. Terminal cleanup matches window ID and TTY, waits for the local process to finish, and only closes a window that still has one tab; adding tabs to that window keeps it open to preserve them (Terminal does not support AppleScript closing individual tabs). Nonzero exits display the status and wait for Enter before closing. The runner uses an absolute script/interpreter path and does not import Qt; no background pool worker is held for the session lifetime.
 - Keep argv structured. Where a shell command is required, quote with `shlex.join`; on macOS pass it as an AppleScript argument rather than interpolating it into script source.
 
 ### Shutdown

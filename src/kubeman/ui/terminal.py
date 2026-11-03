@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import shlex
 import shutil
 import subprocess
@@ -23,24 +25,40 @@ def node_shell_args(context, node, namespace="default", image="ubuntu:24.04"):
             "--root=/proc/1/root", "--wd=/", "--", "/bin/sh"]
 
 
+def _mac_session_command(argv, mac_terminal):
+    # Replace the login shell; the standalone runner closes only its own session.
+    runner = str(Path(__file__).with_name("terminal_session.py").resolve())
+    return "exec " + shlex.join([sys.executable, runner, mac_terminal, json.dumps(argv)])
+
+
 def open_terminal(argv, mac_terminal="Terminal"):
-    """Run argv in a new console window that stays open after it exits (so errors are readable)."""
+    """Open an interactive session; macOS sessions close after a successful command."""
     if sys.platform == "win32":
         subprocess.Popen(["cmd", "/k"] + argv, creationflags=subprocess.CREATE_NEW_CONSOLE)
     elif sys.platform == "darwin":
         # Pass the shell command as an AppleScript argument, never as script source.
         if mac_terminal == "Terminal":
+            command = _mac_session_command(argv, mac_terminal)
             script = ('on run argv\n tell application "Terminal"\n activate\n'
-                      ' do script (item 1 of argv)\n end tell\nend run')
+                      ' set shellTab to do script ""\n'
+                      ' set shellWindowID to id of front window\n'
+                      ' set targetTTY to tty of shellTab\n'
+                      ' do script ((item 1 of argv) & " " & quoted form of (shellWindowID as text)'
+                      ' & " " & quoted form of targetTTY) in shellTab\n end tell\nend run')
         elif mac_terminal == "iTerm2":
+            command = _mac_session_command(argv, mac_terminal)
             script = ('on run argv\n tell application "iTerm2"\n activate\n'
                       ' set shellWindow to (create window with default profile)\n'
+                      ' set shellWindowID to id of shellWindow\n'
                       ' tell current session of shellWindow\n'
-                      ' write text (item 1 of argv)\n end tell\n end tell\nend run')
+                      ' set sessionID to unique ID\n'
+                      ' write text ((item 1 of argv) & " " & quoted form of (shellWindowID as text)'
+                      ' & " " & quoted form of sessionID)\n'
+                      ' end tell\n end tell\nend run')
         else:
             raise ValueError(f"Unsupported macOS terminal: {mac_terminal}")
         try:
-            subprocess.run(["osascript", "-e", script, shlex.join(argv)], check=True,
+            subprocess.run(["osascript", "-e", script, command], check=True,
                            capture_output=True, text=True, timeout=15)
         except subprocess.CalledProcessError as error:
             raise RuntimeError(f"Could not open {mac_terminal}: {error.stderr or error}") from error

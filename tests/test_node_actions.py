@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+import json
 import shlex
 import sys
 
@@ -174,7 +175,9 @@ def test_macos_terminal_command_is_quoted(monkeypatch):
     argv = node_shell_args("context with spaces;echo nope", "node-a")
     terminal.open_terminal(argv)
     assert calls[0][0] == "osascript"
-    assert shlex.split(calls[0][-1]) == argv
+    wrapper = shlex.split(calls[0][-1])
+    assert wrapper[:2] == ["exec", sys.executable]
+    assert json.loads(wrapper[4]) == argv
     assert argv[2] not in calls[0][2]  # command data never becomes AppleScript source
 
 
