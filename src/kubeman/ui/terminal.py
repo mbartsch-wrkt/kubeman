@@ -4,6 +4,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import uuid
+
+
+NODE_SHELL_IMAGE = "docker.io/library/alpine"
 
 
 def kubectl_args(action, context, namespace, pod, container=None):
@@ -18,11 +22,36 @@ def kubectl_args(action, context, namespace, pod, container=None):
     return cmd
 
 
-def node_shell_args(context, node, namespace="default", image="ubuntu:24.04"):
+def node_shell_args(context, node, namespace="default", image=NODE_SHELL_IMAGE):
+    """Linux defaults from the installed kubectl-node-shell v1.11.0 script.
+
+    Use kubectl's attached run/--rm lifecycle so this works on all local
+    platforms without installing the shell plugin or requiring a local shell.
+    """
+    pod = f"nsenter-{uuid.uuid4().hex[:12]}"
+    overrides = {"spec": {
+        "nodeName": node,
+        "hostPID": True,
+        "hostIPC": True,
+        "hostNetwork": True,
+        "imagePullSecrets": None,
+        "containers": [{
+            "name": "nsenter", "image": image,
+            "securityContext": {"privileged": True},
+            "stdin": True, "stdinOnce": True, "tty": True,
+            "command": ["nsenter", "--target", "1", "--mount", "--uts", "--ipc",
+                        "--net", "--pid", "bash", "-l"],
+            "resources": {}, "volumeMounts": [],
+        }],
+        "tolerations": [
+            {"key": "CriticalAddonsOnly", "operator": "Exists"},
+            {"effect": "NoExecute", "operator": "Exists"},
+        ],
+        "volumes": [],
+    }}
     return ["kubectl", "--context", context, "--namespace", namespace,
-            "debug", f"node/{node}", "-it", f"--image={image}", "--profile=sysadmin", "--",
-            "nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid",
-            "--root=/proc/1/root", "--wd=/", "--", "/bin/sh"]
+            "run", pod, "--image", image, "--restart=Never", "--rm", "-it",
+            "--pod-running-timeout=1m", "--overrides", json.dumps(overrides)]
 
 
 def _mac_session_command(argv, mac_terminal):
