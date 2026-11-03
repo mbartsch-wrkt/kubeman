@@ -155,7 +155,7 @@ def test_node_shell_targets_context_and_host_namespaces(qtbot, monkeypatch, work
     opened = []
     ws = workspaces(SimpleNamespace(), "cluster-a")
     monkeypatch.setattr(NodeShellDialog, "exec", lambda d: QDialog.Accepted)
-    monkeypatch.setattr(module, "open_terminal", opened.append)
+    monkeypatch.setattr(module, "open_terminal", lambda argv, terminal: opened.append(argv))
     monkeypatch.setattr(ClusterWorkspace, "_run", lambda self, fn, cb, *args: cb(fn(*args)))
     ws.node_table.action_requested.emit("node-shell", node_row())
     assert opened == [node_shell_args("cluster-a", "node-a")]

@@ -75,6 +75,7 @@ Cluster access comes from kubeconfig and its existing authentication helpers. `k
 | `src/kubeman/ui/node_dialogs.py` | Drain options and privileged nsenter debug-shell options. |
 | `src/kubeman/ui/command_view.py` | QProcess-backed drain output, completion/error reporting, and local process cancellation. |
 | `src/kubeman/ui/terminal.py` | Explicit-context kubectl argv and platform-specific terminal launching. |
+| `src/kubeman/ui/terminal_settings.py` | Saved macOS terminal preference and its settings dialog. |
 | `src/kubeman/ui/customizations.py` | Persistent Node/Pod label-column lists, custom headings, and settings dialog. |
 | `src/kubeman/ui/scale_monitor.py` | Polling scale progress, readiness/failure evaluation, timeouts, and activity display. |
 | `src/kubeman/ui/watcher.py` | `ChangeWatcher` QThread: runs `KubeService.watch_changes` and emits `changed`; `stop()` only sets a flag and never blocks the GUI thread. |
@@ -136,6 +137,7 @@ example.com/team = Team
 - Support earlier saved key lists without headings. Invalid saved configuration falls back to defaults. Default Node labels contain `karpenter.sh/nodepool`; Pod labels are empty.
 - Heading changes are display-only and must never patch Kubernetes labels.
 - Sync settings before updating in-memory preferences/emitting changes. Surface save errors to the user.
+- On macOS, Settings → Terminal… selects Terminal (default) or iTerm2 for all pod shell/attach and node shell actions. `terminal/macos` is saved in the same QSettings store; invalid values fall back to Terminal. Open and subsequently created workspaces share the preference. The menu is macOS-only; iTerm2 must be installed separately.
 - The physical settings path is platform-specific; use `LabelSettings.store.fileName()` rather than hardcoding it.
 - Tests must inject a QSettings instance backed by `tmp_path`; do not overwrite the user's actual preferences.
 
@@ -166,7 +168,7 @@ example.com/team = Team
 - Double-clicking a pod opens its own tab (`pod:<ns>/<name>`) listing its containers, including regular, init, and ephemeral containers, with state, readiness, restart count, and image; double-clicking a container opens its logs. The tab refreshes like any foreground tab and disables its actions if the pod disappears. Double-clicking a node opens its pods tab, which carries the node actions.
 - Logs, Shell, and Attach must target the selected container, cluster context, namespace, and pod. Container-specific log tabs preserve the initial container selection.
 - Commands use explicit `--context`; do not rely on the shell's active kubeconfig context.
-- Windows terminals use `cmd /k` in a new console. macOS uses Terminal via osascript. Linux searches x-terminal-emulator, gnome-terminal, konsole, then xterm.
+- Windows terminals use `cmd /k` in a new console. macOS uses Terminal by default or the saved iTerm2 choice via osascript; both pass the quoted command as an AppleScript argument. Linux searches x-terminal-emulator, gnome-terminal, konsole, then xterm. All terminal opening runs in a worker; macOS automation errors are surfaced with their stderr.
 - Keep argv structured. Where a shell command is required, quote with `shlex.join`; on macOS pass it as an AppleScript argument rather than interpolating it into script source.
 
 ### Shutdown
