@@ -18,13 +18,18 @@ class ResourceTable(QWidget):
         super().__init__()
         self.kind = kind
         self.editable = editable
-        self.model = TableModel(columns)
+        self.base_columns = list(columns)
+        self.model = TableModel(columns, search_metadata=kind == "Node")
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
         self.proxy.setSortRole(Qt.EditRole)
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy.setFilterKeyColumn(-1)
+        if kind == "Node":
+            self.proxy.setFilterRole(TableModel.SearchRole)
         self.filter = QLineEdit(placeholderText="Filter…", clearButtonEnabled=True)
+        if kind == "Node":
+            self.filter.setPlaceholderText("Filter nodes, labels and annotations…")
         self._filter_timer = QTimer(self, interval=200, singleShot=True)
         self._filter_timer.timeout.connect(lambda: self.proxy.setFilterFixedString(self.filter.text()))
         self.filter.textChanged.connect(lambda _: self._filter_timer.start())
@@ -49,6 +54,7 @@ class ResourceTable(QWidget):
         self.view.verticalHeader().setDefaultSectionSize(26)  # dense rows
         self.view.setShowGrid(False)
         self.view.selectionModel().currentRowChanged.connect(self._on_row)
+        self.view.doubleClicked.connect(self._on_double_click)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._context_menu)
         lay = QVBoxLayout(self)
@@ -74,6 +80,26 @@ class ResourceTable(QWidget):
         self.view.resizeColumnsToContents()
         self.status.setText(f"{self.model.rowCount():,} rows" if self.model.rowCount() else "No resources found")
 
+    def set_label_columns(self, keys, headings=None):
+        if self.kind not in ("Node", "Pod"):
+            return
+        columns = list(self.base_columns)
+        anchor = "roles" if self.kind == "Node" else "name"
+        insert_at = next((i + 1 for i, col in enumerate(columns) if col[1] == anchor), len(columns))
+        headings = headings or {}
+        columns[insert_at:insert_at] = [
+            (headings.get(key) or ("NodePool" if key == "karpenter.sh/nodepool" else key), f"label:{key}") for key in keys]
+        if columns == self.model.columns:
+            return
+        header = self.view.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        sort_attr = self.model.columns[sort_column][1] if 0 <= sort_column < len(self.model.columns) else None
+        sort_order = header.sortIndicatorOrder()
+        self.model.set_columns(columns)
+        new_sort = next((i for i, col in enumerate(columns) if col[1] == sort_attr), -1)
+        self.view.sortByColumn(new_sort, sort_order)
+        self.view.resizeColumnsToContents()
+
     def _context_menu(self, pos):
         idx = self.view.indexAt(pos)
         menu = QMenu(self)
@@ -84,6 +110,18 @@ class ResourceTable(QWidget):
                 menu.addAction("Edit…", lambda: self.edit_requested.emit(self.kind, row))
             if self.kind in SCALABLE:
                 menu.addAction("Scale…", lambda: self.scale_requested.emit(self.kind, row))
+            if self.kind == "Node":
+                menu.addSeparator()
+                menu.addAction("List pods on this node", lambda: self.action_requested.emit("node-pods", row))
+                cordoned = (row.raw.get("spec") or {}).get("unschedulable", False)
+                action = "uncordon" if cordoned else "cordon"
+                menu.addAction("Uncordon…" if cordoned else "Cordon…",
+                               lambda: self.action_requested.emit(action, row))
+                menu.addAction("Drain…", lambda: self.action_requested.emit("drain", row))
+                menu.addAction("Shell (nsenter)…", lambda: self.action_requested.emit("node-shell", row))
+                menu.addSeparator()
+                menu.addAction("Delete node…", lambda: self.action_requested.emit("delete-node", row))
+                menu.addAction("Force delete node…", lambda: self.action_requested.emit("force-delete-node", row))
             if self.kind == "Pod":
                 menu.addSeparator()
                 menu.addAction("Logs", lambda: self.action_requested.emit("logs", row))
@@ -91,6 +129,7 @@ class ResourceTable(QWidget):
                 menu.addAction("Attach…", lambda: self.action_requested.emit("attach", row))
                 menu.addSeparator()
                 menu.addAction("Terminate…", lambda: self.action_requested.emit("terminate", row))
+                menu.addAction("Force terminate…", lambda: self.action_requested.emit("force-terminate", row))
         if self.kind == "Namespace":
             menu.addAction("New namespace…", self.new_requested.emit)
         if not menu.isEmpty():
@@ -100,3 +139,8 @@ class ResourceTable(QWidget):
         if current.isValid():
             src = self.proxy.mapToSource(current)
             self.selected.emit(self.model.rows[src.row()])
+
+    def _on_double_click(self, index):
+        if self.kind == "Pod" and index.isValid():
+            row = self.model.rows[self.proxy.mapToSource(index).row()]
+            self.action_requested.emit("containers", row)

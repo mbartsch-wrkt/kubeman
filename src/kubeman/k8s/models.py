@@ -34,6 +34,10 @@ class NodeRow:
     age: str
     raw: dict = field(default_factory=dict, repr=False)
 
+    @property
+    def is_ready(self):
+        return self.status.split(",", 1)[0] == "Ready"
+
 
 @dataclass
 class ReplicaSetRow:

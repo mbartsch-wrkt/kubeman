@@ -72,11 +72,22 @@ def map_pod(p, include_raw=True):
 def map_node(n, include_raw=True):
     labels = n.metadata.labels or {}
     roles = ",".join(sorted(k.split("/", 1)[1] for k in labels if k.startswith("node-role.kubernetes.io/"))) or "<none>"
-    ready = next((c.status for c in n.status.conditions or [] if c.type == "Ready"), "Unknown")
+    conditions = n.status.conditions or []
+    ready = next((c.status for c in conditions if c.type == "Ready"), "Unknown")
+    statuses = [{"True": "Ready", "False": "NotReady"}.get(ready, "Unknown")]
+    if n.spec and n.spec.unschedulable:
+        statuses.append("SchedulingDisabled")
+    for condition in conditions:
+        if condition.type == "Ready":
+            continue
+        if condition.status == "True":
+            statuses.append(condition.type)
+        elif condition.status not in ("True", "False"):
+            statuses.append(f"{condition.type}=Unknown")
     ip = next((a.address for a in n.status.addresses or [] if a.type == "InternalIP"), "")
     alloc = n.status.allocatable or {}
     return NodeRow(
-        n.metadata.name, "Ready" if ready == "True" else "NotReady", roles,
+        n.metadata.name, ",".join(statuses), roles,
         n.status.node_info.kubelet_version if n.status.node_info else "", ip,
         float(parse_quantity(alloc.get("cpu", 0))), float(parse_quantity(alloc.get("memory", 0))) / 2**30,
         format_age(n.metadata.creation_timestamp), _raw(n) if include_raw else {},
@@ -184,8 +195,19 @@ class KubeService:
         return self._core.read_namespaced_pod_log(pod, namespace, container=container, follow=True,
                                                   tail_lines=tail, _preload_content=False)
 
-    def delete_pod(self, name, namespace):
-        self._core.delete_namespaced_pod(name, namespace)
+    def delete_pod(self, name, namespace, force=False):
+        options = {"body": client.V1DeleteOptions(grace_period_seconds=0, propagation_policy="Background")} if force else {}
+        self._core.delete_namespaced_pod(name, namespace, _request_timeout=15, **options)
+
+    def cordon_node(self, name, unschedulable):
+        self._core.patch_node(name, {"spec": {"unschedulable": unschedulable}}, _request_timeout=15)
+
+    def delete_node(self, name, uid, force=False):
+        # Do not delete a replacement node that reused the selected node's name.
+        self._core.delete_node(name, body=client.V1DeleteOptions(
+            preconditions=client.V1Preconditions(uid=uid),
+            grace_period_seconds=0 if force else None,
+            propagation_policy="Background" if force else None), _request_timeout=15)
 
     @staticmethod
     def _iter_list(fn, *args, **kwargs):
@@ -210,6 +232,10 @@ class KubeService:
 
     def list_nodes(self):
         return [map_node(n) for n in self._iter_list(self._core.list_node)]
+
+    def list_node_pods(self, node):
+        return [map_pod(p) for p in self._iter_list(self._core.list_pod_for_all_namespaces,
+                                                 field_selector=f"spec.nodeName={node}")]
 
     def _list_apps(self, all_fn, ns_fn, mapper, namespace):
         items = self._iter_list(ns_fn, namespace) if namespace else self._iter_list(all_fn)
@@ -286,7 +312,7 @@ class KubeService:
         cpu = sum(n.cpu for n in nodes)
         mem = sum(n.memory for n in nodes)
         counts.update({
-            "nodes": len(nodes), "nodes_ready": sum(1 for n in nodes if n.status == "Ready"),
+            "nodes": len(nodes), "nodes_ready": sum(1 for n in nodes if n.is_ready),
             "namespaces": sum(1 for _ in self._iter_list(self._core.list_namespace)),
             "cpu": f"{cpu:.1f} cores", "memory": f"{mem:.2f} GiB",
             "warnings": warnings,

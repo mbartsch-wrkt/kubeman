@@ -71,13 +71,16 @@ def map_configmap(c):
 
 def map_secret(s):
     raw = to_dict(s)
-    for field in ("data", "stringData"):  # never show secret material in the UI
+    for field in ("data", "stringData"):  # details stay masked until explicitly decoded
         if raw.get(field):
             raw[field] = {k: "<hidden>" for k in raw[field]}
     ann = (raw.get("metadata") or {}).get("annotations") or {}
     if "kubectl.kubernetes.io/last-applied-configuration" in ann:
         ann["kubectl.kubernetes.io/last-applied-configuration"] = "<hidden>"
-    return _base(s, raw=raw, type=s.type or "", keys=len(s.data or {}))
+    row = _base(s, raw=raw, type=s.type or "", keys=len(s.data or {}))
+    # Keep encoded values separate from the masked manifest and table columns.
+    row.secret_data = dict(s.data or {})
+    return row
 
 
 def _lb_addresses(lb):
