@@ -1,4 +1,4 @@
-from heapq import nlargest
+from heapq import heappush, heapreplace
 
 from kubernetes import client, config
 from kubernetes.utils import parse_quantity
@@ -14,20 +14,35 @@ FAILING_STATES = {"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "Inval
                   "CreateContainerError", "RunContainerError", "Error", "OOMKilled", "Failed", "Evicted"}
 
 
+OVERVIEW_LIST_CAP = 500  # most rows the overview keeps per drill-down list (pending pods, failed pods, warnings)
+
+
+def pod_bucket(status):
+    """running | pending | failed | done for a mapped pod status; completed pods are 'done'."""
+    if status == "Running":
+        return "running"
+    if status in ("Succeeded", "Completed"):
+        return "done"
+    if status in ("Pending", "ContainerCreating", "PodInitializing", "Terminating") or status.startswith("Init:"):
+        return "pending"
+    return "failed"
+
+
 def pod_buckets(pods):
     """(running, pending, failed) from mapped pod rows; completed pods count as none of them."""
-    running = pending = failed = 0
+    counts = {"running": 0, "pending": 0, "failed": 0, "done": 0}
     for p in pods:
-        s = p.status
-        if s == "Running":
-            running += 1
-        elif s in ("Succeeded", "Completed"):
-            continue
-        elif s in ("Pending", "ContainerCreating", "PodInitializing", "Terminating") or s.startswith("Init:"):
-            pending += 1
-        else:
-            failed += 1
-    return running, pending, failed
+        counts[pod_bucket(p.status)] += 1
+    return counts["running"], counts["pending"], counts["failed"]
+
+
+def keep_newest(heap, cap, ts, seq, item):
+    """Bounded min-heap of the `cap` newest (ts, seq, item); seq breaks ties so items are never compared."""
+    entry = (ts, seq, item)
+    if len(heap) < cap:
+        heappush(heap, entry)
+    elif ts > heap[0][0]:
+        heapreplace(heap, entry)
 
 
 def map_namespace(ns):
@@ -230,37 +245,44 @@ class KubeService:
         return self._iter_list(getattr(api, f"list_{spec.snake}_for_all_namespaces"))
 
     def _overview_events(self, namespace=None):
-        warnings = 0
+        """One streaming pass: (newest 25 events, warning count, newest warnings for the drill-down)."""
+        mapper = SPEC_BY_KEY["events"].mapper
+        recent, warned = [], []
+        count = 0
+        for seq, event in enumerate(self._resource_items("events", namespace)):
+            ts = event.last_timestamp or event.event_time or event.metadata.creation_timestamp or MIN_TS
+            keep_newest(recent, 25, ts, seq, event)
+            if event.type == "Warning":
+                count += 1
+                keep_newest(warned, OVERVIEW_LIST_CAP, ts, seq, event)
 
-        def events():
-            nonlocal warnings
-            for event in self._resource_items("events", namespace):
-                warnings += event.type == "Warning"
-                yield event
+        def rows(heap, **kw):
+            return [mapper(e, **kw) for _, _, e in sorted(heap, key=lambda x: (x[0], x[1]), reverse=True)]
 
-        recent = nlargest(25, events(), key=lambda e: (
-            e.last_timestamp or e.event_time or e.metadata.creation_timestamp or MIN_TS))
-        return [SPEC_BY_KEY["events"].mapper(e) for e in recent], warnings
+        # the 25 recent rows are shown at once; the (up to 500) warnings only serialize when a row is selected
+        return rows(recent), count, rows(warned, lazy=True)
 
     def _overview_pods(self, namespace=None):
+        """One streaming pass: (counts, {"pending": [...], "failed": [...]}); only problem pods keep their raw object."""
         api = self._core
         items = (self._iter_list(api.list_namespaced_pod, namespace) if namespace
                  else self._iter_list(api.list_pod_for_all_namespaces))
-        total = 0
-
-        def rows():
-            nonlocal total
-            for pod in items:
-                total += 1
-                yield map_pod(pod, include_raw=False)
-
-        running, pending, failed = pod_buckets(rows())
-        return {"pods": total, "running": running, "pending": pending, "failed": failed}
+        counts = {"pods": 0, "running": 0, "pending": 0, "failed": 0}
+        problems = {"pending": [], "failed": []}
+        for pod in items:
+            counts["pods"] += 1
+            bucket = pod_bucket(map_pod(pod, include_raw=False).status)
+            if bucket in counts:
+                counts[bucket] += 1
+            if bucket in problems and len(problems[bucket]) < OVERVIEW_LIST_CAP:
+                problems[bucket].append(pod)
+        return counts, {b: [map_pod(p) for p in pods] for b, pods in problems.items()}
 
     def overview_cluster(self):
         nodes = [map_node(n, include_raw=False) for n in self._iter_list(self._core.list_node)]
-        counts = self._overview_pods()
-        events, warnings = self._overview_events()
+        counts, lists = self._overview_pods()
+        events, warnings, warning_rows = self._overview_events()
+        lists["warnings"] = warning_rows
         cpu = sum(n.cpu for n in nodes)
         mem = sum(n.memory for n in nodes)
         counts.update({
@@ -269,11 +291,12 @@ class KubeService:
             "cpu": f"{cpu:.1f} cores", "memory": f"{mem:.2f} GiB",
             "warnings": warnings,
         })
-        return {"counts": counts, "events": events}
+        return {"counts": counts, "events": events, "lists": lists}
 
     def overview_workloads(self, namespace=None):
-        counts = self._overview_pods(namespace)
-        events, warnings = self._overview_events(namespace)
+        counts, lists = self._overview_pods(namespace)
+        events, warnings, warning_rows = self._overview_events(namespace)
+        lists["warnings"] = warning_rows
         apps = self._apps
         for key, all_fn, ns_fn in (
             ("deployments", apps.list_deployment_for_all_namespaces, apps.list_namespaced_deployment),
@@ -285,7 +308,7 @@ class KubeService:
         for key in ("daemonsets", "jobs", "cronjobs"):
             counts[key] = sum(1 for _ in self._resource_items(key, namespace))
         counts["warnings"] = warnings
-        return {"counts": counts, "events": events}
+        return {"counts": counts, "events": events, "lists": lists}
 
     def scale_status(self, kind, name, namespace):
         """Snapshot used by the scale monitor: replica counts, per-pod state with failure reasons, warnings."""

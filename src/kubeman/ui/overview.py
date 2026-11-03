@@ -1,9 +1,10 @@
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout,
+                               QWidget)
 
 from ..k8s.resources import SPEC_BY_KEY
 from .resource_table import ResourceTable
-from .theme import BORDER, MUTED
+from .theme import ACCENT, BORDER, MUTED
 
 # (counts key, caption, tone when the value is non-zero)
 CLUSTER_CARDS = [("nodes", "Nodes", ""), ("nodes_ready", "Nodes ready", ""), ("namespaces", "Namespaces", ""),
@@ -15,49 +16,123 @@ WORKLOAD_CARDS = [("pods", "Pods", ""), ("running", "Running", ""), ("pending", 
                   ("deployments", "Deployments", ""), ("daemonsets", "DaemonSets", ""),
                   ("statefulsets", "StatefulSets", ""), ("replicasets", "ReplicaSets", ""),
                   ("jobs", "Jobs", ""), ("cronjobs", "CronJobs", "")]
+POD_COLUMNS = [("Name", "name"), ("Namespace", "namespace"), ("Ready", "ready"), ("Status", "status"),
+               ("Restarts", "restarts"), ("Node", "node"), ("Age", "age")]
+# cards that drill down when clicked: counts key -> (title, which table shows the rows)
+DRILL_DOWN = {"pending": ("Pending pods", "pods"), "failed": ("Failed pods", "pods"),
+              "warnings": ("Warning events", "events")}
 TONES = {"warn": "#f5a524", "bad": "#e5484d"}
 COLUMNS = 5
 
 
 class Card(QFrame):
-    def __init__(self, title, tone):
+    clicked = Signal(str)
+
+    def __init__(self, key, title, tone):
         super().__init__()
-        self.tone = tone
-        self.setStyleSheet(f"Card {{ border: 1px solid {BORDER}; border-radius: 6px; }}")
+        self.key, self.tone = key, tone
+        self._clickable = self._selected = False
         self.value = QLabel("–")
-        self.value.setStyleSheet("font-size: 22px; font-weight: 600;")
         caption = QLabel(title)
         caption.setStyleSheet(f"color: {MUTED};")
         lay = QVBoxLayout(self)
         lay.addWidget(self.value)
         lay.addWidget(caption)
+        self.set_value("–")
+        self._restyle()
 
     def set_value(self, v):
         self.value.setText(str(v))
-        color = TONES.get(self.tone) if v not in (0, "0") else None
+        color = TONES.get(self.tone) if v not in (0, "0", "–") else None
         self.value.setStyleSheet(f"font-size: 22px; font-weight: 600;{f' color: {color};' if color else ''}")
+
+    def set_clickable(self, on):
+        self._clickable = on
+        self.setCursor(Qt.PointingHandCursor if on else Qt.ArrowCursor)
+        self.setToolTip("Click to list them" if on else "")
+        self._restyle()
+
+    def set_selected(self, on):
+        self._selected = on
+        self._restyle()
+
+    def _restyle(self):
+        border = ACCENT if self._selected else BORDER
+        hover = f"Card:hover {{ border-color: {ACCENT}; }}" if self._clickable else ""
+        self.setStyleSheet(f"Card {{ border: 1px solid {border}; border-radius: 6px; }} {hover}")
+
+    def mousePressEvent(self, event):
+        if self._clickable and event.button() == Qt.LeftButton:
+            self.clicked.emit(self.key)
+        super().mousePressEvent(event)
 
 
 class OverviewView(QWidget):
-    """Summary cards over a recent-events table (Lens-style Overview pages)."""
+    """Summary cards over a table that shows recent events, or, after clicking the Pending / Failed /
+    Warning cards, the pods or events behind that number (Lens-style Overview pages)."""
 
     def __init__(self, cards):
         super().__init__()
         self.cards = {}
+        self._data = None
+        self.focus = None  # drill-down card key currently shown, or None for recent events
         grid = QGridLayout()
         for i, (key, title, tone) in enumerate(cards):
-            self.cards[key] = Card(title, tone)
+            self.cards[key] = Card(key, title, tone)
+            self.cards[key].clicked.connect(self._on_card)
             grid.addWidget(self.cards[key], i // COLUMNS, i % COLUMNS)
-        header = QLabel("Recent events")
-        header.setStyleSheet("font-weight: 600; padding-top: 8px;")
-        header.setAlignment(Qt.AlignLeft)
+        self.title = QLabel("Recent events")
+        self.title.setStyleSheet("font-weight: 600; padding-top: 8px;")
+        self.back = QPushButton("Show recent events")
+        self.back.clicked.connect(lambda: self._set_focus(None))
+        self.back.hide()
+        head = QHBoxLayout()
+        head.addWidget(self.title)
+        head.addStretch(1)
+        head.addWidget(self.back)
         self.events_table = ResourceTable(SPEC_BY_KEY["events"].columns, "Event", editable=False)
+        self.pods_table = ResourceTable(POD_COLUMNS, "Pod")
+        self.warnings_table = ResourceTable(SPEC_BY_KEY["events"].columns, "Event", editable=False)
+        self.stack = QStackedWidget()
+        for t in self.tables():
+            self.stack.addWidget(t)
         lay = QVBoxLayout(self)
         lay.addLayout(grid)
-        lay.addWidget(header)
-        lay.addWidget(self.events_table, 1)
+        lay.addLayout(head)
+        lay.addWidget(self.stack, 1)
+
+    def tables(self):
+        return [self.events_table, self.pods_table, self.warnings_table]
 
     def set_data(self, data):
+        self._data = data
+        lists = data.get("lists", {})
         for key, card in self.cards.items():
             card.set_value(data["counts"].get(key, "–"))
+            card.set_clickable(key in DRILL_DOWN and bool(lists.get(key)))
         self.events_table.set_rows(data["events"])
+        if self.focus and not lists.get(self.focus):
+            self.focus = None  # the problem went away: fall back to recent events
+        self._render()
+
+    def _on_card(self, key):
+        self._set_focus(None if self.focus == key else key)  # clicking the selected card again closes it
+
+    def _set_focus(self, key):
+        self.focus = key
+        self._render()
+
+    def _render(self):
+        for key, card in self.cards.items():
+            card.set_selected(key == self.focus)
+        self.back.setVisible(self.focus is not None)
+        if self.focus is None:
+            self.title.setText("Recent events")
+            self.stack.setCurrentWidget(self.events_table)
+            return
+        title, kind = DRILL_DOWN[self.focus]
+        rows = self._data["lists"][self.focus]
+        table = self.pods_table if kind == "pods" else self.warnings_table
+        table.set_rows(rows)
+        self.title.setText(f"{title} ({len(rows)})")
+        self.stack.setCurrentWidget(table)

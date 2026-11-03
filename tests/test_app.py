@@ -270,6 +270,7 @@ def test_navigator_and_logs(qtbot):
                                    "ReplicaSets", "Jobs", "CronJobs"]
     assert groups["Config"] == ["ConfigMaps", "Secrets"]
     assert groups["Storage"][0] == "Persistent Volume Claims"
+    assert groups["Network"] == ["Services", "Ingresses", "Network Policies"]
     assert win.windowTitle().endswith("ctx")
     win.nav.view_requested.emit("ctx", "deployments")
     assert ws.tabs.tabText(ws.tabs.currentIndex()) == "Deployments"
@@ -721,3 +722,27 @@ def test_disconnect_while_connecting_drops_late_result(qtbot):
     gate.set()
     qtbot.wait(300)  # the late connect result must be ignored: no resurrected state, no errors
     assert win.nav.state("a") == "idle" and win.nav.cluster_item("a").childCount() == 0
+
+
+def test_network_policy_mapper_and_registry():
+    from kubeman.k8s.resources import SPEC_BY_KEY, SPEC_BY_KIND, map_networkpolicy
+
+    meta = client.V1ObjectMeta(name="np", namespace="ns", creation_timestamp=NOW)
+    sel = client.V1LabelSelector(match_labels={"app": "web"}, match_expressions=[
+        client.V1LabelSelectorRequirement(key="tier", operator="In", values=["a", "b"])])
+    peer_rule = client.V1NetworkPolicyIngressRule(_from=[client.V1NetworkPolicyPeer(pod_selector=client.V1LabelSelector())])
+    policy = client.V1NetworkPolicy(metadata=meta, spec=client.V1NetworkPolicySpec(
+        pod_selector=sel, policy_types=["Ingress", "Egress"], ingress=[peer_rule, peer_rule],
+        egress=[client.V1NetworkPolicyEgressRule()]))
+    row = map_networkpolicy(policy)
+    assert row.pod_selector == "app=web,tier In [a,b]"
+    assert (row.policy_types, row.ingress, row.egress) == ("Ingress,Egress", 2, 1)
+    # the classic default-deny: empty selector (every pod) + a listed type + no rules at all
+    deny = map_networkpolicy(client.V1NetworkPolicy(metadata=meta, spec=client.V1NetworkPolicySpec(
+        pod_selector=client.V1LabelSelector(), policy_types=["Ingress"])))
+    assert (deny.pod_selector, deny.policy_types, deny.ingress, deny.egress) == ("<all pods>", "Ingress", 0, 0)
+    assert row.raw["spec"]["podSelector"]["matchLabels"] == {"app": "web"}  # YAML detail / edit use the real object
+    spec = SPEC_BY_KEY["networkpolicies"]
+    assert spec.kind == "NetworkPolicy" and spec.namespaced and spec.editable and SPEC_BY_KIND["NetworkPolicy"] is spec
+    assert [c[0] for c in spec.columns] == ["Name", "Namespace", "Pod Selector", "Policy Types", "Ingress rules",
+                                            "Egress rules", "Age"]

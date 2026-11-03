@@ -11,7 +11,7 @@ from .detail_panel import DetailPanel
 from .edit_dialog import EditDialog
 from .log_view import LogView
 from .namespace_dialog import NamespaceDialog
-from .overview import CLUSTER_CARDS, WORKLOAD_CARDS, OverviewView
+from .overview import CLUSTER_CARDS, POD_COLUMNS, WORKLOAD_CARDS, OverviewView
 from .resource_table import ResourceTable
 from .scale_monitor import ScaleMonitor
 from .terminal import kubectl_args, open_terminal
@@ -74,9 +74,12 @@ class ClusterWorkspace(QMainWindow):
         self.log_dock.hide()
 
         for widget, _ in self.views.values():
-            tables = [widget.events_table] if isinstance(widget, OverviewView) else [widget]
+            tables = widget.tables() if isinstance(widget, OverviewView) else [widget]
             for t in tables:
                 t.selected.connect(self.detail.show_row)
+            if isinstance(widget, OverviewView):  # pending/failed pods listed on an overview behave like the Pods tab
+                widget.pods_table.edit_requested.connect(self.edit_resource)
+                widget.pods_table.action_requested.connect(self.pod_action)
             if isinstance(widget, ResourceTable):
                 widget.edit_requested.connect(self.edit_resource)
                 widget.scale_requested.connect(self.scale_resource)
@@ -105,8 +108,7 @@ class ClusterWorkspace(QMainWindow):
     def _build_views(self):
         T = ResourceTable
         self.ns_table = T([("Name", "name"), ("Status", "status"), ("Age", "age"), ("Labels", "labels")], "Namespace")
-        self.pod_table = T([("Name", "name"), ("Namespace", "namespace"), ("Ready", "ready"), ("Status", "status"),
-                            ("Restarts", "restarts"), ("Node", "node"), ("Age", "age")], "Pod")
+        self.pod_table = T(POD_COLUMNS, "Pod")
         self.node_table = T([("Name", "name"), ("Status", "status"), ("Roles", "roles"), ("Version", "version"),
                              ("IP", "ip"), ("CPU (cores)", "cpu", lambda v: f"{v:.1f}"),
                              ("Memory (GiB)", "memory", lambda v: f"{v:.2f}"), ("Age", "age")], "Node")

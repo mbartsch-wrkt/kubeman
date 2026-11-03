@@ -13,8 +13,19 @@ class Row:
     """Generic table row: fixed name/namespace/raw plus arbitrary column values as attributes."""
 
     def __init__(self, name, namespace, raw, **values):
-        self.name, self.namespace, self.raw = name, namespace, raw
+        self.name, self.namespace, self._raw = name, namespace, raw
         self.__dict__.update(values)
+
+    @property
+    def raw(self):
+        """The manifest as a dict. May be given as a callable, which is run on first access and cached."""
+        if callable(self._raw):
+            self._raw = self._raw()
+        return self._raw
+
+    @raw.setter
+    def raw(self, value):
+        self._raw = value
 
     def __repr__(self):
         return f"Row({self.namespace}/{self.name})"
@@ -88,6 +99,22 @@ def map_ingress(i):
                  ports="80, 443" if sp.tls else "80")
 
 
+def _selector(sel):
+    """Render a label selector; an empty selector means every pod in the namespace."""
+    if sel is None:
+        return "<all pods>"
+    parts = [f"{k}={v}" for k, v in (sel.match_labels or {}).items()]
+    parts += [f"{e.key} {e.operator} [{','.join(e.values or [])}]" for e in sel.match_expressions or []]
+    return ",".join(parts) or "<all pods>"
+
+
+def map_networkpolicy(n):
+    sp = n.spec
+    # an empty ingress/egress list with the type listed means "deny all" in that direction, so show the counts as-is
+    return _base(n, pod_selector=_selector(sp.pod_selector), policy_types=",".join(sp.policy_types or []),
+                 ingress=len(sp.ingress or []), egress=len(sp.egress or []))
+
+
 def map_pvc(p):
     return _base(p, status=p.status.phase or "", volume=p.spec.volume_name or "",
                  capacity=(p.status.capacity or {}).get("storage", ""), access_modes=",".join(p.spec.access_modes or []),
@@ -109,10 +136,12 @@ def map_storageclass(s):
                  default="yes" if default else "")
 
 
-def map_event(e):
+def map_event(e, lazy=False):
+    """lazy=True defers serializing the manifest until the row's raw is first read (used for long drill-down lists)."""
     io = e.involved_object
     ts = e.last_timestamp or e.event_time or e.metadata.creation_timestamp
-    return Row(e.metadata.name, e.metadata.namespace or "", to_dict(e), type=e.type or "", reason=e.reason or "",
+    raw = (lambda: to_dict(e)) if lazy else to_dict(e)
+    return Row(e.metadata.name, e.metadata.namespace or "", raw, type=e.type or "", reason=e.reason or "",
                object=f"{io.kind}/{io.name}" if io else "", message=e.message or "", count=e.count or 1,
                last_seen=format_age(ts), ts=ts or MIN_TS)
 
@@ -151,6 +180,9 @@ SPECS = [
     Spec("ingresses", "Ingresses", "Ingress", "ingress", "net", True,
          (("Name", "name"), NS, ("Class", "ingress_class"), ("Hosts", "hosts"), ("Address", "address"),
           ("Ports", "ports"), AGE), map_ingress),
+    Spec("networkpolicies", "Network Policies", "NetworkPolicy", "network_policy", "net", True,
+         (("Name", "name"), NS, ("Pod Selector", "pod_selector"), ("Policy Types", "policy_types"),
+          ("Ingress rules", "ingress"), ("Egress rules", "egress"), AGE), map_networkpolicy),
     Spec("persistentvolumeclaims", "Persistent Volume Claims", "PersistentVolumeClaim", "persistent_volume_claim", "core", True,
          (("Name", "name"), NS, ("Status", "status"), ("Volume", "volume"), ("Capacity", "capacity"),
           ("Access Modes", "access_modes"), ("Storage Class", "storage_class"), AGE), map_pvc),
