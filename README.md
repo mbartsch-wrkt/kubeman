@@ -49,12 +49,12 @@ kubeconfig and authentication helpers, so there is nothing to sign in to and no 
 ## Install
 
 Native packages are built for Windows (an installer and a portable `.zip`) and macOS (a `.dmg` for Apple Silicon and
-one for Intel). None has been published yet; once they are, they will be on the project's
-[Releases](https://github.com/mbartsch/klotse/releases) page. Until then, run Klotse from source (below) or build the
-packages yourself (see [Development](#development)).
+one for Intel). Version 0.1.0 is on the project's [Releases](https://github.com/mbartsch/klotse/releases) page, with
+a `SHA256SUMS.txt` to check the downloads against. You can also run Klotse from source (below) or build the packages
+yourself (see [Development](#development)).
 
-- The Windows installer has been tested (install, run, uninstall). The macOS apps are built and self-tested in CI but
-  have not been run on a real Mac yet.
+- The Windows installer has been tested (install, run, uninstall). The macOS apps are built and self-tested in CI, and
+  the 0.1.0 release has been tested on an Apple Silicon Mac (M3 Pro, macOS 26.7.1). The Intel build has not been run on an Intel Mac.
 - The packages are not signed yet, so expect a warning on first start: on Windows choose **More info → Run anyway**,
   on macOS right-click the app and choose **Open**.
 - `kubectl` is not included and has to be installed separately.
@@ -66,7 +66,7 @@ dependencies in their own environment and puts a `klotse` command on your `PATH`
 
 ```sh
 pipx install git+https://github.com/mbartsch/klotse   # straight from GitHub (works today)
-pipx install klotse                                   # from PyPI, once the first release is published
+pipx install klotse                                   # from PyPI
 klotse --install-desktop-entry                        # optional, Linux: add Klotse to the application menu
 ```
 

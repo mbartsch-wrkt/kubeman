@@ -39,7 +39,7 @@ Both scripts finish by running the packaged app's own self-test (below), and fai
 
 - **Actions → Package → Run workflow** builds everything and keeps the files as downloadable artifacts.
 - **Pushing a tag** such as `v0.1.0` does the same and then creates a **draft** release with the files and a
-  `SHA256SUMS.txt` attached. Nothing is public until you publish the draft. The version comes from the tag
+  `SHA256SUMS.txt` attached (this worked for `v0.1.0`). Nothing is public until you publish the draft. The version comes from the tag
   (`v0.2.0` becomes `0.2.0`), so there is no file to edit; a tag that is not a plain `vX.Y.Z` stops the build.
 
 To release: merge to `master`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. Builds from any other commit get a
@@ -65,7 +65,7 @@ self-test headless and inside a real X11 session (Xvfb), and checks the desktop 
 
 ### Publishing to PyPI
 
-Nothing has been published. A published version can never be replaced, only yanked, so check the CI results first.
+Version 0.1.0 is already on PyPI. A published version can never be replaced, only yanked, so check the CI results first.
 The workflow publishes with PyPI's *trusted publishing* (a short-lived token issued to the workflow, nothing stored in
 GitHub secrets). One-time setup:
 
@@ -128,8 +128,10 @@ not written yet, because it cannot be tested without the certificate.
   uninstall (folder, Start Menu entry and uninstall registration all removed). Not tested: the interactive wizard,
   the "all users" mode (needs administrator rights), upgrading over an older version, and SmartScreen behaviour.
 - macOS: the CI builds (Apple Silicon and Intel) pass: the app builds, its self-test passes inside `Klotse.app`, the
-  ad-hoc signature verifies and the DMG is created. Not tested: running the app on a real Mac, the Terminal/iTerm2
-  permission prompt and shell sessions, the Finder `PATH` fix, Gatekeeper behaviour, and opening the DMG.
-- Linux has no native package (AppImage, `.deb`, `.rpm`); pipx/PyPI is the supported route. Nothing is on PyPI yet.
+  ad-hoc signature verifies and the DMG is created. The owner has tested the 0.1.0 release on an Apple Silicon Mac
+  (M3 Pro, macOS 26.7.1); whether the Terminal/iTerm2 permission prompt and shell sessions, the Finder `PATH` fix,
+  Gatekeeper behaviour and opening the DMG were each exercised was not recorded. The Intel (x86_64) build has not been
+  run on an Intel Mac.
+- Linux has no native package (AppImage, `.deb`, `.rpm`); pipx/PyPI is the supported route (0.1.0 is on PyPI).
 - No automatic update check, no Windows ARM64 build (the x64 app runs under emulation).
 - No CI exists yet for the test suite itself.
