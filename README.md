@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/klotse/assets/klotse_logo.png" alt="Klotse logo" width="200">
+  <img src="https://raw.githubusercontent.com/mbartsch/klotse/master/src/klotse/assets/klotse_logo.png" alt="Klotse logo" width="200">
 </p>
 
 # Klotse
@@ -45,6 +45,42 @@ kubeconfig and authentication helpers, so there is nothing to sign in to and no 
 - A kubeconfig with at least one context (or pick one in Edit → Preferences)
 - [`kubectl`](https://kubernetes.io/docs/tasks/tools/) on your `PATH`, for drain, shells and attach
 - Python dependencies (installed by the launchers): `PySide6-Essentials`, `kubernetes`, `PyYAML`
+
+## Install
+
+Native packages are built for Windows (an installer and a portable `.zip`) and macOS (a `.dmg` for Apple Silicon and
+one for Intel). None has been published yet; once they are, they will be on the project's
+[Releases](https://github.com/mbartsch/klotse/releases) page. Until then, run Klotse from source (below) or build the
+packages yourself (see [Development](#development)).
+
+- The Windows installer has been tested (install, run, uninstall). The macOS apps are built and self-tested in CI but
+  have not been run on a real Mac yet.
+- The packages are not signed yet, so expect a warning on first start: on Windows choose **More info → Run anyway**,
+  on macOS right-click the app and choose **Open**.
+- `kubectl` is not included and has to be installed separately.
+
+### Linux, or anywhere with Python 3.10+: pipx
+
+There is no native Linux package yet. Install with [pipx](https://pipx.pypa.io), which keeps Klotse and its
+dependencies in their own environment and puts a `klotse` command on your `PATH`:
+
+```sh
+pipx install git+https://github.com/mbartsch/klotse   # straight from GitHub (works today)
+pipx install klotse                                   # from PyPI, once the first release is published
+klotse --install-desktop-entry                        # optional, Linux: add Klotse to the application menu
+```
+
+`klotse --uninstall-desktop-entry` removes the menu entry again. On a minimal Debian/Ubuntu install Qt may also need
+these libraries for its X11 support (the project's CI installs exactly this list on Ubuntu and starts Klotse under
+X11); most desktops already have them:
+
+```sh
+sudo apt install libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+```
+
+On other distributions install the equivalent packages. If Klotse stops with "could not load the Qt platform plugin
+xcb", run `QT_DEBUG_PLUGINS=1 klotse` to see which library is missing.
 
 ## Run
 
@@ -111,7 +147,17 @@ real settings. `run_tests.sh` / `run_tests.bat` wrap the same command.
 After all tests pass the pytest process can still exit non-zero (a crash during Qt teardown in some test orders).
 This is a known, unresolved issue that predates recent work, so check the pass count and the exit status separately.
 
-[`AGENTS.md`](AGENTS.md) documents the architecture, file map and behavior to preserve; read it before larger
+To build the native packages (details, signing and releases in [`packaging/README.md`](https://github.com/mbartsch/klotse/blob/master/packaging/README.md)):
+
+```sh
+powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1   # Windows: zip, plus installer if Inno Setup is installed
+packaging/macos/build.sh                                               # macOS: Klotse.app and a .dmg
+```
+
+A packaged app can check itself: `Klotse --version` and `Klotse --self-test [REPORT_FILE]`. GitHub Actions builds
+everything on a version tag (`v0.1.0`) or on demand and drafts a release.
+
+[`AGENTS.md`](https://github.com/mbartsch/klotse/blob/master/AGENTS.md) documents the architecture, file map and behavior to preserve; read it before larger
 changes. Work goes through pull requests from a branch; do not commit to `master` directly.
 
 ## Roadmap
@@ -121,7 +167,7 @@ point. Nothing is decided and there is no timeline; the Python version is the on
 
 ## License
 
-Klotse is released under the [Apache License 2.0](LICENSE).
+Klotse is released under the [Apache License 2.0](https://github.com/mbartsch/klotse/blob/master/LICENSE).
 
 Kubernetes is a registered trademark of The Linux Foundation. Klotse is an independent project and is not
 affiliated with or endorsed by The Linux Foundation or the Kubernetes project.

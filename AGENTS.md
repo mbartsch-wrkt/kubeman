@@ -51,11 +51,15 @@ The package also declares a `klotse` GUI entry point. Use `PYTHONPATH=src` for r
 
 Cluster access comes from kubeconfig and its existing authentication helpers. `kubectl` must be available on PATH for drain and terminal operations. Shell/debug actions also need suitable cluster permissions and a supported local terminal. Local unit tests do not require a live cluster.
 
+Native Windows/macOS packages are built with PyInstaller (`packaging/`, see the Packaging section below and `packaging/README.md`). A packaged app answers `--version` and `--self-test [FILE]`; the build scripts run the self-test and fail if it does not pass.
+
 ## Architecture and file map
 
 | File | Responsibility |
 | --- | --- |
 | `src/klotse/__main__.py` | QApplication startup, theme, main window, bounded process shutdown. |
+| `src/klotse/cli.py` | Command-line actions handled before the GUI starts (no Qt at import): `--version`, `--install-desktop-entry`, `--uninstall-desktop-entry`, `--self-test [FILE]` (checks a packaged build: imports, Qt plugins, logo, dialogs; exit 0 = OK) and `--terminal-session` (the macOS shell runner, reached through the app binary when packaged). |
+| `src/klotse/desktop_entry.py` | Linux application-menu entry for pip/pipx installs: `klotse --install-desktop-entry` writes `~/.local/share/applications/klotse.desktop` and the icon (no root), `--uninstall-desktop-entry` removes them. Uses the Desktop Entry quoting rules for `Exec`; `__main__` sets the Wayland desktop file name to `klotse`. |
 | `src/klotse/workers.py` | QRunnable worker and Qt result/error signals for blocking service calls. |
 | `src/klotse/k8s/client.py` | KubeService, context-specific API clients, pagination, resource loading, mutations, overview aggregation, node-specific pod queries and per-node pod counts, change watches (`watch_targets`/`watch_changes`), optional metrics-server usage, and custom resource listing. |
 | `src/klotse/k8s/models.py` | Dataclass rows for namespaces, pods, nodes, and core workloads. Pod/Node rows carry usage fields (`cpu_used`, `mem_used`, `-1` = unknown); Node rows also carry `pods` (`-1` = not counted). |
@@ -82,6 +86,7 @@ Cluster access comes from kubeconfig and its existing authentication helpers. `k
 | `src/klotse/ui/terminal_settings.py` | Saved macOS terminal preference and its settings dialog. |
 | `src/klotse/ui/terminal_session.py` | Standalone macOS session runner and targeted cleanup after successful commands. |
 | `src/klotse/ui/customizations.py` | Persistent per-kind column layout and label columns (readable INI sections), custom headings, and the Columns… dialog. |
+| `src/klotse/ui/environment.py` | macOS only: when the app is started from Finder/Dock, extends `PATH` (Homebrew and other usual directories plus the login shell's `PATH`, with a 3 s timeout) so `kubectl` and kubeconfig auth helpers are found. |
 | `src/klotse/ui/edit_menu.py` | Edit menu actions (undo/redo/cut/copy/paste/select all) for the focused text box or table. |
 | `src/klotse/ui/preferences.py` | Custom kubeconfig setting and the Preferences dialog (kubeconfig picker, open config folder). |
 | `src/klotse/ui/scale_monitor.py` | Polling scale progress, readiness/failure evaluation, timeouts, and activity display. |
@@ -89,6 +94,7 @@ Cluster access comes from kubeconfig and its existing authentication helpers. `k
 | `src/klotse/ui/namespace_dialog.py` | Namespace creation form. |
 | `src/klotse/ui/theme.py` | Application palette and Qt stylesheet. |
 | `scripts/benchmark_large_cluster.py` | Offline synthetic pod-mapping/table-load benchmark. |
+| `packaging/` | Windows and macOS packages (PyInstaller `klotse.spec`, `windows/build.ps1` + `klotse.iss` for Inno Setup, `macos/build.sh` + entitlements) and `README.md` with the build, signing and release steps. `.github/workflows/package.yml` builds them in CI and drafts a release on a `v*` tag. |
 
 Core resource tables cover Nodes, Namespaces, Pods, Deployments, ReplicaSets, and StatefulSets. The SPECS registry adds DaemonSets, Jobs, CronJobs, ConfigMaps, Secrets, Services, Ingresses, NetworkPolicies, PVCs, PVs, StorageClasses, CustomResourceDefinitions, and Events. Secrets and Events have no Edit action. Custom resource instances (`cr:<plural>.<group>` tabs) are read-only.
 
@@ -228,11 +234,22 @@ git diff --check
 
 ### Validation snapshot
 
-At the last check the full offline suite reported **170 passed** (counts are snapshots; rerun after edits). The five overview tests in `tests/test_performance.py` that once failed on stale return shapes were updated in PR #3 and pass; current `_overview_pods()` returns `(counts, lists)` and `_overview_events()` returns `(events, warning_count, warning_rows)`, so keep the drill-down data when changing those tests.
+At the last check the full offline suite reported **265 passed** (counts are snapshots; rerun after edits; `tests/test_packaging_support.py` covers the CLI flags, the frozen-app terminal command and the macOS `PATH` helper; `tests/test_desktop_entry.py` covers the Linux menu entry). The five overview tests in `tests/test_performance.py` that once failed on stale return shapes were updated in PR #3 and pass; current `_overview_pods()` returns `(counts, lists)` and `_overview_events()` returns `(events, warning_count, warning_rows)`, so keep the drill-down data when changing those tests.
 
 Known, unresolved: after all tests pass the pytest process can still exit non-zero (139 segfault, or 127) when a test that builds a `ClusterWorkspace` is followed by a test that runs a background worker. It also happens on `master` from before these features; it is intermittent and did not go away with deferred worker cleanup, parenting `QSettings`, or draining the thread pool. Single test files usually exit 0 (not reliably; `test_bulk.py` and `test_performance.py` have crashed on their own), while the full run exited 127 at the last check. Do not report a passing count as proof of a clean exit, and check the process exit status separately.
 
 Live checks against a real cluster were read-only (listing, a watch, metrics when present). Watch events arriving, real metrics-server numbers, CRD instances, and the cordon/drain/delete actions from the new bars and tabs have not been exercised against a live cluster.
+
+## Packaging
+
+- Windows and macOS packages are built with PyInstaller from `packaging/klotse.spec` (see `packaging/README.md`). Build in the isolated `.venv-build`; output goes to the git-ignored `dist/` and `build/`.
+- Keep the packaged app working when changing shared code. In a frozen app `sys.frozen` is set, `sys.executable` is the app binary (not Python) and modules have no loose `.py` files next to them: never start a helper as `sys.executable some_script.py`, and ship any file read at runtime by listing it in the spec's `datas` (the files directly in `src/klotse/assets/` are included automatically; `assets/source/` is not).
+- `Klotse --self-test [FILE]` is the packaged-app smoke test: add a check there when the app starts depending on something that could go missing from a bundle (a plugin, a data file, a hidden import). The build scripts run it and fail on a non-zero exit.
+- The version has one source, `klotse.__version__`; it feeds pyproject, About, the Windows version resource, the macOS `Info.plist` and the installer. A `v*` tag must equal it.
+- The Windows `AppId` GUID in `packaging/windows/klotse.iss` must never change once a release exists (it lets installers upgrade and uninstall).
+- Verified so far, on a Windows machine: the one-folder build and its self-test, a headless launch of the packaged exe, and the Inno Setup installer (silent per-user install, installed app self-test, clean uninstall). Also verified in GitHub Actions (PR #14): the Windows build and installer, and the macOS arm64 and x86_64 builds (self-test inside `Klotse.app`, ad-hoc signature, DMG created). Not verified: the installer's interactive wizard, all-users mode and upgrades; running the app on a real Mac (the Terminal/iTerm2 prompt and shell sessions, the Finder `PATH` fix, Gatekeeper, opening the DMG); and the release job (tag only). Say so when reporting packaging status; do not call them tested.
+- Linux is served by the Python package (`pipx install klotse`, or `pipx install git+https://github.com/mbartsch/klotse`), not by a native package: AppImage/.deb/.rpm are the next step if needed; Flatpak/Snap are poor fits because the sandbox blocks `kubectl`, cloud auth helpers and the host terminal. `pyproject.toml` carries the PyPI metadata (keep `classifiers` valid for PyPI, `readme` links absolute, and only `src/klotse/assets/*.png|jpg` shipped: `assets/source/` stays out of the wheel). `.github/workflows/pypi.yml` builds the sdist and wheel, installs the wheel with pipx on Python 3.10/3.12/3.13, runs the self-test headless and under Xvfb, checks the desktop entry, and publishes with trusted publishing only for a `v*` tag through the `pypi` environment. Nothing has been published to PyPI yet; publishing is irreversible, so do not trigger it without the owner's explicit go-ahead.
+- Packages are unsigned; see `packaging/README.md` for what signing and notarization still need (a Windows Authenticode certificate and an Apple Developer ID).
 
 ## Change conventions
 
