@@ -100,6 +100,10 @@ class ClusterWorkspace(QMainWindow):
         self._watched = None  # (view key, namespace) the running watches belong to
         self._watch_timer = QTimer(self, interval=WATCH_DEBOUNCE_MS, singleShot=True)
         self._watch_timer.timeout.connect(self._watch_reload)
+        self._clock = perf_counter  # tests replace it
+        self._last_load = {}  # view key -> when its last load started; watch reloads wait for the refresh interval
+        self._watch_late = QTimer(self, singleShot=True)
+        self._watch_late.timeout.connect(self._watch_reload)
         self.setWindowFlags(Qt.Widget)
         # side docks span the full height; the log dock sits under the central tabs only
         self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
@@ -115,6 +119,8 @@ class ClusterWorkspace(QMainWindow):
         if self.plugin_host is not None:
             for table in self.resource_tables():
                 self._hook_table(table)
+            plugins.settings_changed.connect(self.plugin_host.forget)  # new settings: what was fetched may be wrong now
+            self.plugin_host.overview_updated.connect(self._apply_plugin_overview)
             plugins.changed.connect(self._plugins_changed)
             self.plugin_host.updated.connect(self._plugins_updated)
 
@@ -238,7 +244,7 @@ class ClusterWorkspace(QMainWindow):
         # looked up at call time so a swapped/faked service keeps working
         svc = lambda: self.service  # noqa: E731
         self.loaders = {
-            "overview": (lambda ns: svc().overview_cluster(), False, self.overview.set_data),
+            "overview": (lambda ns: svc().overview_cluster(), False, self._overview_loaded),
             "workloads": (lambda ns: svc().overview_workloads(ns), True, self.wl_overview.set_data),
             "nodes": (lambda ns: svc().list_nodes(), False, self._set_nodes),
             "namespaces": (lambda ns: svc().list_namespaces(), False, self._set_namespaces),
@@ -258,6 +264,15 @@ class ClusterWorkspace(QMainWindow):
         for widget, _ in self.views.values():
             yield from widget.tables() if isinstance(widget, OverviewView) else [widget]
 
+    def _overview_loaded(self, data):
+        self.overview.set_data(data)
+        if self.plugin_host is not None:  # plugins' cards (a total cost, say): computed when due, last values kept meanwhile
+            self.plugin_host.refresh_overview(lambda: self.service.list_nodes())
+
+    def _apply_plugin_overview(self):
+        self.overview.set_plugin_cards(self.plugin_host.overview_cards())
+        self.overview.set_plugin_values(self.plugin_host.overview_values())
+
     def _hook_table(self, table):
         """Let plugins add columns to this table (only the customizable lists, not the Overview's drill-downs) and
         ask them for values whenever rows arrive."""
@@ -265,6 +280,7 @@ class ClusterWorkspace(QMainWindow):
             return
         table._plugin_hooked = True
         table.set_extra_columns(self.plugins.columns_for(table.kind))
+        table.rows_incoming.connect(lambda rows, t=table: self.plugin_host.apply(t.kind, rows))
         table.rows_set.connect(lambda rows, t=table: self.plugin_host.rows_loaded(t.kind, rows))
         table.plugin_actions = self.plugin_runner.offered  # right-click entries plugins add
         table.plugin_action_requested.connect(
@@ -279,12 +295,16 @@ class ClusterWorkspace(QMainWindow):
             table.set_extra_columns(self.plugins.columns_for(table.kind))
             self.plugin_host.rows_loaded(table.kind, table.model.rows)
         self._plugins_updated(None)
+        self._apply_plugin_overview()  # cards of a plugin that was disabled go, those of one enabled come with the next load
+        if self._ready:  # connected: compute the cards now if due (a settings change makes them due)
+            self.plugin_host.refresh_overview(lambda: self.service.list_nodes())
 
     def _plugins_updated(self, kind):
         for table in self._hooked_tables():
             if kind is None or table.kind == kind:
                 self.plugin_host.apply(table.kind, table.model.rows)
                 table.model.refresh_plugin_columns()
+                table.fit_plugin_columns()
 
     def apply_label_columns(self):
         for table in self.resource_tables():
@@ -374,10 +394,17 @@ class ClusterWorkspace(QMainWindow):
         self._watchers.clear()
         self._watched = None
         self._watch_timer.stop()
+        self._watch_late.stop()
 
     def _watch_reload(self):
         key = self.foreground_key()
         if self._watched and self._watched[0] == key and not self._closed:
+            # A busy cluster changes all the time: a change reloads the list at once, but never more often than the
+            # refresh interval (10 s by default), so the list does not flicker faster than the user asked for.
+            wait = self._auto_timer.interval() / 1000 - (self._clock() - self._last_load.get(key, float("-inf")))
+            if wait > 0:
+                self._watch_late.start(int(wait * 1000) + 1)
+                return
             self.load_view(key)  # coalesces with a load that is already running
 
     def set_auto_refresh(self, enabled):
@@ -507,6 +534,7 @@ class ClusterWorkspace(QMainWindow):
         if table is not None:
             table.set_loading()
         started = perf_counter()
+        self._last_load[key] = self._clock()
         self.message.emit(f"{self.context} / {title}: Loading…")
 
         def finished(data, error=False):

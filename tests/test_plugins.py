@@ -493,7 +493,8 @@ def test_reloading_finds_a_plugin_added_to_the_folder(qtbot, tmp_path):
 def test_plugins_live_in_preferences_not_in_a_menu_of_their_own(qtbot, tmp_path, monkeypatch):
     win = MainWindow(FakeService, label_settings=LabelSettings(store(tmp_path)))
     qtbot.addWidget(win)
-    assert [a.text() for a in win.menuBar().actions()] == ["File", "Edit", "View", "Help"]  # no Settings menu anywhere
+    # no Settings menu anywhere; "Plugins" only appears while an enabled plugin has settings for each cluster
+    assert [a.text() for a in win.menuBar().actions() if a.isVisible()] == ["File", "Edit", "View", "Help"]
     assert "Plugins…" not in [a.text() for a in win.edit_menu.actions()]
     assert win.plugins.folder == tmp_path / "plugins"
     win.open_cluster("ctx")
@@ -551,3 +552,39 @@ def test_the_plugins_page_applies_at_once_while_saving_keeps_the_other_pages(qtb
     assert terminal.mac_terminal == "Terminal"  # a choice on the other pages waits for Save
     dialog._save()
     assert terminal.mac_terminal == "iTerm2" and dialog.result() == QDialog.Accepted
+
+
+def test_an_answer_with_warnings_is_asked_for_again_after_a_minute_not_after_refresh_s(qtbot, tmp_path):
+    class Partial(Zone):
+        id = "partial"
+        refresh_s = 1800
+
+        def enrich(self, request):
+            if request.plugin_id == "partial" and self.warn:
+                request.warn("the login expired")
+            return {r.key: {"zone": "a"} for r in request.resources}
+
+    plugin = Partial()
+    plugin.warn = True
+    host, _, run, manager, clock = host_for(tmp_path, plugin)
+    rows = [node("n1")]
+    host.rows_loaded("Node", rows)
+    run.finish()
+    assert manager.errors == {"partial": "the login expired"}
+    host.apply("Node", rows)
+    assert rows[0].extra["plugin:partial:zone"] == "a"  # the values are used even so
+    clock[0] += 30
+    host.rows_loaded("Node", [node("n1")])
+    assert run.calls == []  # too soon
+    clock[0] += RETRY_AFTER_S
+    plugin.warn = False  # the user signed in again
+    host.rows_loaded("Node", [node("n1")])
+    assert len(run.calls) == 1  # asked again long before the 30 minutes
+    run.finish()
+    assert manager.errors == {}
+    clock[0] += 1000
+    host.rows_loaded("Node", [node("n1")])
+    assert run.calls == []  # a complete answer waits for refresh_s again
+    clock[0] += 900
+    host.rows_loaded("Node", [node("n1")])
+    assert len(run.calls) == 1
