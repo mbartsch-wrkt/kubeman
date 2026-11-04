@@ -9,12 +9,13 @@ from PySide6.QtWidgets import (QDockWidget, QMainWindow, QMessageBox, QSizePolic
 from .about import AboutDialog
 from .cluster_groups import ClusterGroups
 from .cluster_session import ClusterSession
+from ..plugins.manager import PluginManager
 from .customizations import LabelColumnsDialog, LabelSettings
 from .edit_menu import EditActions
 from .log_view import shutdown_all
 from .navigator import Navigator
 from .preferences import KubeconfigSettings, PreferencesDialog
-from .terminal_settings import TerminalSettings, TerminalSettingsDialog
+from .terminal_settings import TerminalSettings
 from .workspace import ClusterWorkspace
 
 
@@ -26,7 +27,7 @@ class MainWindow(QMainWindow):
 
     closing = Signal()
 
-    def __init__(self, service_factory, label_settings=None):
+    def __init__(self, service_factory, label_settings=None, plugin_manager=None):
         super().__init__()
         self.factory = service_factory
         self.workspaces = {}  # context name -> ClusterWorkspace
@@ -35,6 +36,9 @@ class MainWindow(QMainWindow):
         self.kubeconfig_settings = KubeconfigSettings(self.label_settings.store, parent=self)
         self.session = ClusterSession(self.label_settings.store)  # clusters to reconnect, only if the user said so
         self.groups = ClusterGroups(self.label_settings.store)  # folders in the cluster list
+        # plugins: bundled, pip (entry points) and the plugins folder next to the settings file; all off until enabled
+        self.plugins = plugin_manager if plugin_manager is not None else PluginManager(
+            self.label_settings.store, folder=Path(self.label_settings.store.fileName()).parent / "plugins", parent=self)
         self.setWindowTitle("Klotse")
         self.resize(1500, 850)
         self._shutting_down = False
@@ -54,10 +58,6 @@ class MainWindow(QMainWindow):
         self.managed_fields_action = QAction("Show managedFields in details", self, checkable=True, checked=False)
         self.managed_fields_action.setToolTip("Include metadata.managedFields in the Details pane (hidden by default)")
         self.menuBar().addMenu("View").addAction(self.managed_fields_action)
-        if sys.platform == "darwin":
-            self.terminal_settings_action = QAction("Terminal…", self)
-            self.terminal_settings_action.triggered.connect(self.configure_terminal)
-            self.menuBar().addMenu("Settings").addAction(self.terminal_settings_action)
         self.about_action = QAction("About Klotse", self)
         self.about_action.setMenuRole(QAction.AboutRole)
         self.about_action.triggered.connect(self.show_about)
@@ -138,7 +138,7 @@ class MainWindow(QMainWindow):
             self.clusters.setCurrentWidget(self.workspaces[ctx])
             return
         ws = ClusterWorkspace(self.new_service(), ctx, label_settings=self.label_settings,
-                              terminal_settings=self.terminal_settings)
+                              terminal_settings=self.terminal_settings, plugins=self.plugins)
         self.workspaces[ctx] = ws
         ws.detail.set_show_managed_fields(self.managed_fields_action.isChecked())
         self.managed_fields_action.toggled.connect(ws.detail.set_show_managed_fields)
@@ -160,7 +160,11 @@ class MainWindow(QMainWindow):
         dialog.deleteLater()
 
     def open_preferences(self):
-        dialog = PreferencesDialog(self.kubeconfig_settings, self.config_folder(), self)
+        # One Preferences window for everything: General, Terminal (macOS only: the only terminal choice there is) and
+        # Plugins. macOS shows the entry in the application menu (Settings/Preferences, Cmd-,), elsewhere it is Edit.
+        dialog = PreferencesDialog(self.kubeconfig_settings, self.config_folder(), self,
+                                   terminal=self.terminal_settings if sys.platform == "darwin" else None,
+                                   plugins=self.plugins)
         accepted = dialog.exec() == PreferencesDialog.Accepted
         chosen = dialog.chosen_kubeconfig()
         dialog.deleteLater()
@@ -199,11 +203,6 @@ class MainWindow(QMainWindow):
                         metadata = (row.raw or {}).get("metadata") or {}
                         available.update((metadata.get("labels") or {}).keys())
         dialog = LabelColumnsDialog(kind, self.label_settings, available, builtin, self)
-        dialog.exec()
-        dialog.deleteLater()
-
-    def configure_terminal(self):
-        dialog = TerminalSettingsDialog(self.terminal_settings, self)
         dialog.exec()
         dialog.deleteLater()
 
