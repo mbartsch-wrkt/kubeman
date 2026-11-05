@@ -13,7 +13,7 @@ Everything a plugin author needs is in `klotse.plugins`:
 | `Plugin` | Base class. Set `id`, `name`, `description`, `version`, `requires_api`, `columns`, `actions`, `settings`, `refresh_s` and override `enrich()` (columns), `run()` (actions) and optionally `applies()`. |
 | `Column(key, title, kinds=("Node",), format=None)` | A column for tables of those kinds (`"Node"`, `"Pod"`, `"Deployment"`, ...). `format` is an optional `value -> str` for display; sorting uses the raw value, so numbers stay numbers. |
 | `Action(key, title, kinds=("Node",), multi=False, confirm=None, dangerous=False)` | A right-click entry. `multi`: also offered when several rows are selected. `confirm`: a Yes/No question asked first. `dangerous`: it changes things; marked with ⚠ and always asks first. |
-| `Setting(key, label, default, kind="text" or "multiline" or "bool", help="")` | A setting the Plugins dialog shows ("multiline" is a text box for lists, one entry per line); its value reaches `enrich()` and `run()` in `request.settings`. |
+| `Setting(key, label, default, kind="text" or "password" or "note" or "multiline" or "bool", help="")` | A setting the Plugins dialog shows ("multiline" is a text box for lists, one entry per line; "note" shows its label as a large warning box and holds no value; "password" hides what is typed, but it is saved as plain text in the settings file like every other setting); its value reaches `enrich()` and `run()` in `request.settings`. |
 | `EnrichRequest` | What `enrich()` receives: `plugin_id`, `kind`, `context` (the kubeconfig context), `resources`, `settings`, `cache_dir` (a folder to keep downloaded data in; create it when needed) and `warn(text)` (report a problem without giving up: the values you return are still used and the text is shown in the Plugins page). |
 | `ActionRequest` | What `run()` receives: `plugin_id`, `action` (the key), `kind`, `context`, `resources`, `settings`, plus `log(line)`, `api_client()`, `kubectl` and `cache_dir`. |
 | `ResourceInfo` | One resource: `name`, `namespace`, `raw` (the full manifest, read-only), `key` (`name`, or `namespace/name`), `uid`. |
@@ -112,10 +112,10 @@ provides (`requires_api`) is listed in the dialog with the reason; it never stop
 
 ## API versions
 
-`klotse.plugins.API_VERSION` is 6: version 1 had columns, version 2 added actions, version 3 added `cache_dir` and
+`klotse.plugins.API_VERSION` is 7: version 1 had columns, version 2 added actions, version 3 added `cache_dir` and
 `EnrichRequest.warn`, version 4 added multi-line settings, version 5 added Overview cards, version 6 added cluster
-settings. Set `requires_api` to the lowest
-version that has what your plugin uses (2 for actions, 3 for `cache_dir` or `warn`, 4 for multi-line settings, 5 for Overview cards, 6 for cluster settings); a Klotse that only knows version 1 then lists it as not loadable instead of failing oddly.
+settings, version 7 added password settings. Set `requires_api` to the lowest
+version that has what your plugin uses (2 for actions, 3 for `cache_dir` or `warn`, 4 for multi-line settings, 5 for Overview cards, 6 for cluster settings, 7 for password settings); a Klotse that only knows version 1 then lists it as not loadable instead of failing oddly.
 
 ## Cluster settings
 
@@ -127,9 +127,9 @@ setting; an empty box means "not set for this cluster". The values reach `enrich
 general settings). `Setting.pattern`, if given, is a regular expression a non-empty value must match completely. Saving
 makes every open list and Overview ask the plugin again. They are stored in `[plugin_<id>_clusters]` of the settings file.
 
-## The bundled plugin: AWS nodes
+## The bundled plugin: AWS Plugin
 
-Klotse ships one plugin of its own, **AWS nodes** (`klotse_plugins/aws_nodes`), written against this same API. It is off
+Klotse ships one plugin of its own, **AWS Plugin** (`klotse_plugins/aws`; id `aws`), written against this same API. It is off
 until you enable it. For nodes that are EC2 instances (an `aws:///zone/i-...` providerID, which EKS and Karpenter set) it
 adds these columns to the Nodes list:
 
@@ -170,7 +170,7 @@ and these right-click actions: **Copy instance ID** (several nodes at once), **O
   is not listed uses *AWS profile (default for all clusters)*. The profile of the cluster a node belongs to is used for the
   EC2 lookups, the cost estimate and the automatic console sign-in. Changing a setting makes the plugin ask again for
   what it showed (the details it already kept for good are not asked again).
-- **Profile and account from the menu.** With the plugin enabled and a cluster in front, **Plugins → AWS nodes: settings
+- **Profile and account from the menu.** With the plugin enabled and a cluster in front, **Plugins → AWS Plugin: settings
   for this cluster…** sets that cluster's *AWS profile* and, optionally, *AWS account ID* (12 digits). The profile wins
   over the per-cluster list in the plugin's settings and the default profile. The account is normally not needed: for
   "Open in the EC2 console" with several accounts it is taken from the menu, the per-cluster account list, the EKS ARN in
