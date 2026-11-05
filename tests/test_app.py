@@ -175,7 +175,14 @@ def test_edit_flow_calls_replace(qtbot, monkeypatch):
         def exec(self):
             return 1
 
+    class FakeForm(FakeDialog):  # a Pod has a form now; this one accepts at once
+        wants_yaml = False
+
+        def deleteLater(self):
+            pass
+
     monkeypatch.setattr(mw, "EditDialog", FakeDialog)
+    monkeypatch.setattr(mw, "WorkloadEditDialog", FakeForm)
     win = MainWindow(lambda: svc)
     qtbot.addWidget(win)
     open_active(win)
@@ -351,7 +358,7 @@ def test_generic_views_lazy_and_namespace_scoped(qtbot):
     ws.tabs.setCurrentWidget(ws.views["persistentvolumes"][0])  # switching by clicking a tab reloads it too
     qtbot.waitUntil(lambda: ("persistentvolumes", None) in svc.requested, timeout=5000)
     # read-only kinds expose no Edit action
-    assert not ws.views["secrets"][0].editable and not ws.views["events"][0].editable
+    assert ws.views["secrets"][0].editable and not ws.views["events"][0].editable  # secrets: form editor only
     assert ws.views["services"][0].editable
 
 

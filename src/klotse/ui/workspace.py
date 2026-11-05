@@ -11,7 +11,7 @@ from ..k8s.api_index import ApiIndex
 from ..k8s.resources import DELETABLE_KINDS, SPECS
 from ..plugins.host import PluginHost
 from ..workers import Worker
-from .account_directory import AccountDirectory, SecretDirectory
+from .account_directory import AccountDirectory, IngressClassDirectory, LabelDirectory, SecretDirectory, ServiceDirectory
 from .api_index_loader import ApiIndexLoader
 from .binding_editor import BINDING_KINDS, BindingEditDialog, care_warnings
 from .command_view import CommandView
@@ -28,6 +28,11 @@ from .overview import CLUSTER_CARDS, POD_COLUMNS, WORKLOAD_CARDS, OverviewView, 
 from .resource_table import ResourceTable
 from .role_editor import RULE_KINDS, RoleEditDialog, aggregated_note, confirm_risky
 from .service_account_editor import ServiceAccountEditDialog
+from .data_editor import DATA_KINDS, DataEditDialog, new_manifest
+from .network_editor import NetworkEditDialog, new_manifest as network_manifest
+from .network_model import NETWORK_KINDS
+from .workload_editor import WorkloadEditDialog
+from .workload_model import CREATABLE_KINDS, EDIT_KINDS, skeleton
 from .scale_monitor import ScaleMonitor
 from .terminal import kubectl_args, node_shell_args, open_terminal
 from .terminal_settings import TerminalSettings
@@ -163,6 +168,9 @@ class ClusterWorkspace(QMainWindow):
                 widget.pods_table.action_requested.connect(self.pod_action)
                 widget.pods_table.bulk_requested.connect(self.bulk_action)
             if isinstance(widget, ResourceTable):
+                if widget.kind in (*CREATABLE_KINDS, *DATA_KINDS, *NETWORK_KINDS):  # these kinds can be created from their list
+                    widget.enable_new()
+                    widget.new_requested.connect(lambda *_a, k=widget.kind: self.create_resource(k))
                 widget.customize_requested.connect(self.customize_requested)
                 widget.bulk_requested.connect(self.bulk_action)
                 widget.edit_requested.connect(self.edit_resource)
@@ -641,33 +649,121 @@ class ClusterWorkspace(QMainWindow):
         directories[namespace].start()
         return directories[namespace]
 
+    def ingress_class_directory(self):
+        """The cluster's IngressClasses for the Ingress editor: loaded once, in the background."""
+        if getattr(self, "_ingress_classes", None) is None:
+            self._ingress_classes = IngressClassDirectory(self.service, self._run, parent=self)
+        self._ingress_classes.start()
+        return self._ingress_classes
+
+    def service_directory(self, namespace):
+        """The service names of one namespace for the Ingress editor: loaded once per namespace."""
+        directories = self.__dict__.setdefault("_service_directories", {})
+        if namespace not in directories:
+            directories[namespace] = ServiceDirectory(self.service, self._run, namespace, parent=self)
+        directories[namespace].start()
+        return directories[namespace]
+
+    def label_directory(self, namespace):
+        """The labels on the pods of one namespace for the selector boxes: loaded once per namespace."""
+        directories = self.__dict__.setdefault("_label_directories", {})
+        if namespace not in directories:
+            directories[namespace] = LabelDirectory(self.service, self._run, namespace, parent=self)
+        directories[namespace].start()
+        return directories[namespace]
+
+    def _has_form(self, kind, raw):
+        """Whether the kind has a form editor for this manifest (an aggregated role's rules are overwritten, so no)."""
+        return (kind in RULE_KINDS and not raw.get("aggregationRule")) or kind in BINDING_KINDS \
+            or kind == "ServiceAccount" or kind in EDIT_KINDS or kind in DATA_KINDS or kind in NETWORK_KINDS
+
+    def _form_for(self, kind, raw, namespace, creating=False, secret_data=None):
+        if kind in RULE_KINDS:
+            return RoleEditDialog(kind, raw, self.api_loader(), self)
+        if kind in BINDING_KINDS:
+            return BindingEditDialog(kind, raw, self.account_directory(), self)
+        if kind == "ServiceAccount":
+            return ServiceAccountEditDialog(kind, raw, self.secret_directory(namespace), self)
+        if kind in NETWORK_KINDS:
+            return NetworkEditDialog(kind, raw, self, create=creating, namespaces=self._namespace_names(),
+                                     classes=self.ingress_class_directory() if kind == "Ingress" else None,
+                                     labels=self.label_directory((raw.get("metadata") or {}).get("namespace") or namespace)
+                                     if kind != "Ingress" else None,
+                                     services=self.service_directory((raw.get("metadata") or {}).get("namespace") or namespace)
+                                     if kind == "Ingress" else None)
+        if kind in DATA_KINDS:
+            return DataEditDialog(kind, raw, self, secret_data=secret_data, create=creating,
+                                  namespaces=self._namespace_names())
+        return WorkloadEditDialog(kind, raw, self, create=creating, namespaces=self._namespace_names())
+
+    def _namespace_names(self):
+        return [self.ns_combo.itemText(i) for i in range(self.ns_combo.count()) if self.ns_combo.itemText(i) != ALL_NS]
+
     def edit_resource(self, kind, row):
-        warnings = care_warnings(kind, row.raw)
-        note = "\n\n".join(([aggregated_note(row.raw)] if kind in RULE_KINDS and aggregated_note(row.raw) else [])
-                            + warnings)
-        form = None
-        if kind in RULE_KINDS and not row.raw.get("aggregationRule"):  # an aggregated role's rules are overwritten
-            form = RoleEditDialog(kind, row.raw, self.api_loader(), self)
-        elif kind in BINDING_KINDS:
-            form = BindingEditDialog(kind, row.raw, self.account_directory(), self)
-        elif kind == "ServiceAccount":
-            form = ServiceAccountEditDialog(kind, row.raw, self.secret_directory(row.namespace), self)
-        if form is not None:
-            accepted = form.exec() == QDialog.Accepted
-            form.deleteLater()
-            if accepted:
-                self.message.emit(f"Saving {kind} {row.name}…")
-                self._run(self.service.replace, lambda _: self._saved(kind, row.name), kind, form.result_body)
+        self._edit_flow(kind, row.raw, row.name, row.namespace, secret_data=getattr(row, "secret_data", None))
+
+    def create_resource(self, kind):
+        """New Deployment, DaemonSet, StatefulSet, Pod, ConfigMap or Secret: the form (or YAML) starts from a skeleton in the
+        chosen namespace."""
+        namespace = DEFAULT_NS if self.namespace() == ALL_NS else self.namespace()
+        raw = (new_manifest(kind, namespace) if kind in DATA_KINDS else
+               network_manifest(kind, namespace) if kind in NETWORK_KINDS else skeleton(kind, namespace))
+        self._edit_flow(kind, raw, "", "", creating=True)
+
+    def _edit_flow(self, kind, raw, name, namespace, creating=False, secret_data=None):
+        """The form and the YAML editor are two views of one manifest: each hands its current (pending) changes to the
+        other, until one of them saves or the user cancels."""
+        current, from_yaml = raw, False
+        while True:
+            form = None
+            if self._has_form(kind, current):
+                try:
+                    form = self._form_for(kind, current, namespace or (current.get("metadata") or {}).get("namespace", ""),
+                                          creating, secret_data)
+                except Exception as error:  # noqa: BLE001 - YAML typed by hand that the form cannot show
+                    if not from_yaml:
+                        raise
+                    QMessageBox.warning(self, "Edit in form", f"The form cannot show this YAML ({error}). "
+                                        "Fix it here, or keep editing as YAML.")
+            if form is not None:
+                accepted = form.exec() == QDialog.Accepted
+                form.deleteLater()
+                if accepted:
+                    self._submit(kind, name, form.result_body, creating, namespace)
+                    return
+                if not form.wants_yaml:
+                    return
+                current = getattr(form, "pending", None) or current  # the form's pending changes, shown in YAML
+            warnings = [] if creating else care_warnings(kind, current)
+            note = "" if creating else "\n\n".join(
+                ([aggregated_note(current)] if kind in RULE_KINDS and aggregated_note(current) else []) + warnings)
+            title = f"New {kind}" if creating else f"Edit {kind} {name}"
+            dlg = EditDialog(title, current, self, note=note, can_form=self._has_form(kind, current))
+            if dlg.exec() == EditDialog.Accepted:
+                if not confirm_risky(self, kind, name, warnings):
+                    return
+                self._submit(kind, name, dlg.result_body, creating)
                 return
-            if not form.wants_yaml:
+            if not getattr(dlg, "wants_form", False):
                 return
-        dlg = EditDialog(f"Edit {kind} {row.name}", row.raw, self, note=note)
-        if dlg.exec() != EditDialog.Accepted:
+            current, from_yaml = dlg.pending_body, True  # the YAML as typed, shown in the form
+
+    def _submit(self, kind, name, body, creating, namespace=""):
+        name = name or (body.get("metadata") or {}).get("name", "")
+        if kind == "Secret" and not creating:  # the form hands over a patch with only what changed, never the whole Secret
+            self.message.emit(f"Saving Secret {name}…")
+            self._run(self.service.patch_secret, lambda _: self._saved(kind, name), namespace, name, body)
             return
-        if not confirm_risky(self, kind, row.name, warnings):
+        if creating:
+            self.message.emit(f"Creating {kind} {name}…")
+            self._run(self.service.create, lambda _: self._created(kind, name), kind, body)
             return
-        self.message.emit(f"Saving {kind} {row.name}…")
-        self._run(self.service.replace, lambda _: self._saved(kind, row.name), kind, dlg.result_body)
+        self.message.emit(f"Saving {kind} {name}…")
+        self._run(self.service.replace, lambda _: self._saved(kind, name), kind, body)
+
+    def _created(self, kind, name):
+        self.message.emit(f"Created {kind} {name}")
+        self.refresh()
 
     DELETE_NOTES = {
         "ClusterRole": "Bindings that refer to it stop granting anything; aggregated roles are rebuilt by the controller.",

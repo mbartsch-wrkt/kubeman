@@ -168,6 +168,39 @@ class KubeService:
     def create_namespace(self, body):
         return map_namespace(self._core.create_namespace(body))
 
+    def create(self, kind, body):
+        """Create a Deployment, DaemonSet, StatefulSet, Pod, ConfigMap or Secret from a manifest (like `kubectl create`);
+        returns the stored row."""
+        ns = (body.get("metadata") or {}).get("namespace") or "default"
+        if kind == "Pod":
+            return map_pod(self._core.create_namespaced_pod(ns, body))
+        if kind == "Deployment":
+            return map_deployment(self._apps.create_namespaced_deployment(ns, body))
+        if kind == "StatefulSet":
+            return map_statefulset(self._apps.create_namespaced_stateful_set(ns, body))
+        if kind == "DaemonSet":
+            return SPEC_BY_KIND["DaemonSet"].mapper(self._apps.create_namespaced_daemon_set(ns, body))
+        if kind == "Service":
+            return SPEC_BY_KIND["Service"].mapper(self._core.create_namespaced_service(ns, body))
+        if kind in ("Ingress", "NetworkPolicy"):
+            net = self._apis["net"]
+            create = net.create_namespaced_ingress if kind == "Ingress" else net.create_namespaced_network_policy
+            return SPEC_BY_KIND[kind].mapper(create(ns, body))
+        if kind in ("Job", "CronJob"):
+            batch = self._apis["batch"]
+            create = batch.create_namespaced_job if kind == "Job" else batch.create_namespaced_cron_job
+            return SPEC_BY_KIND[kind].mapper(create(ns, body))
+        if kind == "ConfigMap":
+            return SPEC_BY_KIND["ConfigMap"].mapper(self._core.create_namespaced_config_map(ns, body))
+        if kind == "Secret":
+            return SPEC_BY_KIND["Secret"].mapper(self._core.create_namespaced_secret(ns, body))
+        raise ValueError(f"Creating {kind} is not supported")
+
+    def patch_secret(self, namespace, name, patch):
+        """Change a Secret with a merge patch that holds only what changed (a key set to None is removed). The values that
+        were not touched are never sent back."""
+        return SPEC_BY_KIND["Secret"].mapper(self._core.patch_namespaced_secret(name, namespace, patch))
+
     def replace(self, kind, body):
         """Replace a resource with an edited manifest (like `kubectl replace`); returns the stored row."""
         meta, api = body["metadata"], self._core
@@ -246,6 +279,31 @@ class KubeService:
             token = (page.get("metadata") or {}).get("continue")
             if not token:
                 return names
+
+    def list_service_names(self, namespace):
+        """Names of the services of a namespace, for the Ingress editor's backend boxes."""
+        return [s.metadata.name for s in self._iter_list(self._core.list_namespaced_service, namespace)]
+
+    def list_pod_labels(self, namespace):
+        """[(key, value)] of the labels on the pods of a namespace, for the selector boxes (metadata only, paged)."""
+        accept = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json"
+        pairs, token = set(), None
+        while True:
+            reply = self._core.list_namespaced_pod(namespace, limit=500, _continue=token, _request_timeout=30,
+                                                   _preload_content=False, _headers={"Accept": accept})
+            page = json.loads(reply.data)
+            for item in page.get("items") or []:
+                pairs.update(((item.get("metadata") or {}).get("labels") or {}).items())
+            token = (page.get("metadata") or {}).get("continue")
+            if not token:
+                return sorted(pairs)
+
+    def list_ingress_class_names(self):
+        """[(name, is_default)] of the cluster's IngressClasses, for the Ingress editor's class box."""
+        flag = "ingressclass.kubernetes.io/is-default-class"
+        found = self._apis["net"].list_ingress_class(_request_timeout=30)
+        return [(c.metadata.name, ((c.metadata.annotations or {}).get(flag) == "true"))
+                for c in found.items or []]
 
     def delete_resource(self, kind, name, namespace, uid):
         """Delete a deletable registry kind (the RBAC ones). The UID precondition keeps a replacement object that
