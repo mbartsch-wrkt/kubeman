@@ -13,6 +13,7 @@ from ..plugins.host import PluginHost
 from ..workers import Worker
 from .account_directory import AccountDirectory, ConfigMapDirectory, IngressClassDirectory, LabelDirectory, SecretDirectory, ServiceDirectory
 from .api_index_loader import ApiIndexLoader
+from .apply_dialog import ApplyDialog
 from .binding_editor import BINDING_KINDS, BindingEditDialog, care_warnings
 from .command_view import CommandView
 from .customizations import LabelSettings
@@ -625,6 +626,24 @@ class ClusterWorkspace(QMainWindow):
         w.signals.result.connect(lambda r: done(on_result, r))
         w.signals.error.connect(lambda m: done(on_error or self._on_error, m))
         self.pool.start(w)
+
+    def show_apply_yaml(self):
+        """File > Apply YAML…: paste or open manifests, check them with the server and apply them (server-side apply)."""
+        dialog = self.apply_dialog()
+        dialog.exec()
+        dialog.deleteLater()
+
+    def apply_dialog(self):
+        ns = DEFAULT_NS if self.namespace() == ALL_NS else self.namespace()
+        dialog = ApplyDialog(self.context, ns, self)
+
+        def run(docs, dry_run):
+            self.message.emit(f"{self.context}: {'checking' if dry_run else 'applying'} {len(docs)} object(s)…")
+            self._run(self.service.apply_documents, lambda results: dialog.show_results(results, dry_run), docs, ns, dry_run,
+                      on_error=dialog.show_error)
+        dialog.run_requested.connect(run)
+        dialog.applied.connect(self.refresh)
+        return dialog
 
     def show_permissions(self):
         """View > My permissions…: the user's own permissions in the namespace in front, and a Can I? check."""
