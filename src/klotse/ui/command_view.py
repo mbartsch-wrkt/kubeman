@@ -23,7 +23,7 @@ class CommandView(QWidget):
         self.text.setPlainText(shlex.join(argv) + "\n\n")
         self.stop_button = QPushButton("Stop drain")
         self.stop_button.clicked.connect(self.stop)
-        self.status = QLabel("Draining… The node stays cordoned after completion, failure or stop.")
+        self.status = QLabel("Draining… Nodes stay cordoned after completion, failure or stop.")
         layout = QVBoxLayout(self)
         layout.addWidget(self.status)
         layout.addWidget(self.stop_button)
@@ -51,7 +51,7 @@ class CommandView(QWidget):
         self._done = True
         self._read()
         self._append(self._decoder.decode(b"", final=True))
-        self.status.setText(status + " The node remains cordoned if cordon succeeded.")
+        self.status.setText(status + " Nodes remain cordoned if cordon succeeded.")
         self.stop_button.setEnabled(False)
         self.completed.emit(success)
 

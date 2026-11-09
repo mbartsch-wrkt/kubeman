@@ -2342,7 +2342,9 @@ class ClusterWorkspace(QMainWindow):
             return
         n = len(rows)
         names = self._names(rows)
-        if action == "scale":
+        if action == "drain" and kind == "Node":
+            self.drain_nodes(rows)
+        elif action == "scale":
             olds = {id(r): (r.raw.get("spec") or {}).get("replicas", 1) for r in rows}
             text, ok = QInputDialog.getText(
                 self, f"Scale {n} {kind}s",
@@ -2503,27 +2505,7 @@ class ClusterWorkspace(QMainWindow):
             args = (row.name, uid, True) if force else (row.name, uid)
             self._run(self.service.delete_node, lambda _: self._node_changed(row.name, "Deleted"), *args)
         elif action == "drain":
-            # Focus an already running drain instead of starting a second one.
-            for i in range(self.log_tabs.count()):
-                existing = self.log_tabs.widget(i)
-                if getattr(existing, "key", None) == ("drain", row.name) and not existing._done:
-                    self.log_tabs.setCurrentIndex(i)
-                    self.log_dock.show()
-                    return
-            loader = getattr(self.service, "drain_preview_data", None)
-            dialog = DrainDialog(self.context, row.name, self, kubeconfig=self.kubeconfig,
-                                 preview_loader=(lambda ok, bad, n=row.name: self._run(loader, ok, n, on_error=bad)) if loader else None)
-            if dialog.exec() != QDialog.Accepted:
-                return
-            self.record_change("drain", row.name)
-            view = CommandView(dialog.command())
-            view.key = ("drain", row.name)
-            view.completed.connect(lambda success: self._node_changed(
-                row.name, "Drain completed" if success else "Drain failed or stopped; see activity"))
-            self.log_tabs.setCurrentIndex(self.log_tabs.addTab(view, f"Drain: {row.name}"))
-            self.log_dock.show()
-            self.message.emit(f"Draining node {row.name}…")
-            view.start()
+            self.drain_nodes([row])
         elif action == "node-shell":
             info = (row.raw.get("status") or {}).get("nodeInfo") or {}
             if info.get("operatingSystem") == "windows":
@@ -2535,6 +2517,47 @@ class ClusterWorkspace(QMainWindow):
             argv = node_shell_args(self.context, row.name, dialog.namespace.text().strip(), dialog.image.text().strip(),
                                    kubeconfig=self.kubeconfig)
             self._launch_terminal(argv, f"Opened node shell: {row.name}")
+
+    def drain_nodes(self, rows):
+        """One options dialog and one kubectl drain for the selected nodes, including previews and overlap protection."""
+        if not rows or not self._writable("drain nodes"):
+            return
+        nodes = tuple(dict.fromkeys(row.name for row in rows))
+        for i in range(self.log_tabs.count()):
+            existing = self.log_tabs.widget(i)
+            if set(nodes).intersection(getattr(existing, "drain_nodes", ())) and not existing._done:
+                self.log_tabs.setCurrentIndex(i)
+                self.log_dock.show()
+                self.message.emit("A selected node is already being drained; see the running drain before starting another.")
+                return
+        loader = getattr(self.service, "drain_preview_data", None)
+
+        def preview():
+            pods, budgets = [], {}
+            for node in nodes:
+                node_pods, node_budgets = loader(node)
+                pods.extend(node_pods)
+                for budget in node_budgets:
+                    meta = budget.get("metadata") or {}
+                    budgets[(meta.get("namespace", ""), meta.get("name", ""))] = budget
+            return pods, list(budgets.values())
+
+        dialog = DrainDialog(self.context, nodes, self, kubeconfig=self.kubeconfig,
+                             preview_loader=(lambda ok, bad: self._run(preview, ok, on_error=bad)) if loader else None)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        for node in nodes:
+            self.record_change("drain", node)
+        view = CommandView(dialog.command())
+        view.key = ("drain", nodes[0] if len(nodes) == 1 else nodes)
+        view.drain_nodes = nodes
+        title = nodes[0] if len(nodes) == 1 else f"{len(nodes)} nodes"
+        view.completed.connect(lambda success: self._node_changed(
+            title, "Drain completed" if success else "Drain failed or stopped; see activity"))
+        self.log_tabs.setCurrentIndex(self.log_tabs.addTab(view, f"Drain: {title}"))
+        self.log_dock.show()
+        self.message.emit(f"Draining {title}…")
+        view.start()
 
     def _node_changed(self, name, message):
         if self._closed:

@@ -37,7 +37,7 @@ def test_bulk_menu_offers_actions_per_kind(qtbot):
     ws = make_ws(qtbot)
     for table, expected in ((ws.pod_table, ["Usage history of 2 Pods…", "Logs of 2 pods…", "Terminate 2 pods…", "Force terminate 2 pods…"]),
                             (ws.deploy_table, ["Usage history of 2 Deployments…", "Scale 2 Deployments…", "Restart 2 Deployments…"]),
-                            (ws.node_table, ["Usage history of 2 Nodes…", "Cordon 2 nodes…", "Uncordon 2 nodes…", "Delete 2 nodes…",
+                            (ws.node_table, ["Usage history of 2 Nodes…", "Cordon 2 nodes…", "Uncordon 2 nodes…", "Drain 2 nodes…", "Delete 2 nodes…",
                                              "Force delete 2 nodes…"])):
         menu = QMenu()
         table._bulk_menu(menu, [object(), object()])
@@ -114,6 +114,63 @@ def test_bulk_cordon_nodes(qtbot, monkeypatch):
     ws.bulk_action("Node", "uncordon", [node("n1"), node("n2")])
     wait_idle(qtbot, ws)
     assert calls == [("n1", False), ("n2", False)]
+
+
+def test_bulk_drain_confirmation_preview_options_and_overlap(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from klotse.ui.command_view import CommandView
+    from klotse.ui.node_dialogs import DrainDialog
+
+    started, asked, audited, loaded = [], [], [], []
+    budget = {"metadata": {"namespace": "ns", "name": "shared"}}
+    def preview(name):
+        loaded.append(name)
+        return [{"metadata": {"name": name, "namespace": "ns"}}], [budget]
+    ws = make_ws(qtbot, drain_preview_data=preview)
+    ws.service.kubeconfig = "/tmp/custom config"
+    ws.record_change = lambda *args: audited.append(args)
+    ws._run = lambda fn, cb, *args, **kwargs: cb(fn(*args))
+    monkeypatch.setattr(CommandView, "start", lambda view: started.append(view.argv))
+    rows = [node("n1"), node("n2")]
+
+    monkeypatch.setattr(DrainDialog, "exec", lambda dialog: QDialog.Rejected)
+    ws.bulk_action("Node", "drain", rows)
+    assert started == audited == []
+
+    def accept(dialog):
+        asked.append(dialog.nodes)
+        dialog.load_preview()
+        assert [p["metadata"]["name"] for p in dialog._preview_data[0]] == ["n1", "n2"]
+        assert dialog._preview_data[1] == [budget]  # a shared PDB is counted once
+        dialog.force.setChecked(True)
+        dialog.delete_emptydir.setChecked(True)
+        return QDialog.Accepted
+    monkeypatch.setattr(DrainDialog, "exec", accept)
+    menu = QMenu()
+    ws.node_table._bulk_menu(menu, rows)
+    next(a for a in menu.actions() if a.text() == "Drain 2 nodes…").trigger()
+    assert asked == [("n1", "n2")] and loaded == ["n1", "n2"]
+    assert started == [["kubectl", "--kubeconfig", ws.kubeconfig, "--context", "ctx", "--request-timeout=30s",
+                        "drain", "n1", "n2", "--timeout=10m", "--ignore-daemonsets", "--delete-emptydir-data", "--force"]]
+    assert audited == [("drain", "n1"), ("drain", "n2")]
+    ws.node_action("drain", rows[0])
+    ws.bulk_action("Node", "drain", [rows[1], node("n3")])
+    assert len(started) == len(asked) == ws.log_tabs.count() == 1
+    ws.log_tabs.widget(0)._done = True
+    monkeypatch.setattr(DrainDialog, "exec", lambda dialog: QDialog.Accepted)
+    ws.node_action("drain", rows[0])
+    assert len(started) == 2  # a completed drain does not block a retry
+
+
+def test_bulk_drain_read_only_never_opens_options(qtbot, monkeypatch):
+    from klotse.ui.node_dialogs import DrainDialog
+
+    ws = make_ws(qtbot)
+    ws.read_only = True
+    monkeypatch.setattr(QMessageBox, "information", lambda *a: None)
+    monkeypatch.setattr(DrainDialog, "exec", lambda dialog: (_ for _ in ()).throw(AssertionError("opened")))
+    ws.bulk_action("Node", "drain", [node("n1"), node("n2")])
+    assert ws.log_tabs.count() == 0
 
 
 def test_parse_scale_expressions():
