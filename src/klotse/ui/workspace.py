@@ -2027,7 +2027,8 @@ class ClusterWorkspace(QMainWindow):
         return [self.ns_combo.itemText(i) for i in range(self.ns_combo.count()) if self.ns_combo.itemText(i) != ALL_NS]
 
     def edit_resource(self, kind, row):
-        self._edit_flow(kind, row.raw, row.name, row.namespace, secret_data=getattr(row, "secret_data", None))
+        self._edit_flow(kind, row.raw, row.name, getattr(row, "namespace", ""),
+                        secret_data=getattr(row, "secret_data", None))
 
     def create_resource(self, kind):
         """New Deployment, DaemonSet, StatefulSet, Pod, ConfigMap or Secret: the form (or YAML) starts from a skeleton in the

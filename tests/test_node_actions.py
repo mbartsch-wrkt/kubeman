@@ -42,6 +42,33 @@ def node_row(cordoned=False):
                    {"metadata": {"uid": "uid-a"}, "spec": {"unschedulable": cordoned}})
 
 
+def test_edit_node_reaches_yaml_and_replace(monkeypatch, workspaces):
+    from klotse.ui import workspace as mw
+
+    row = node_row()
+    body = {**row.raw, "metadata": {**row.raw["metadata"], "name": row.name, "labels": {"edited": "yes"}}}
+    calls = []
+    ws = workspaces(SimpleNamespace(replace=lambda *args: calls.append(args)), "cluster-a")
+
+    class Editor:
+        Accepted = QDialog.Accepted
+        result_body = body
+
+        def __init__(self, title, raw, parent, **kwargs):
+            assert title == "Edit Node node-a"
+            assert raw is row.raw
+
+        def exec(self):
+            return self.Accepted
+
+    monkeypatch.setattr(mw, "EditDialog", Editor)
+    monkeypatch.setattr(ws, "refresh", lambda: None)
+    monkeypatch.setattr(ws, "_run", lambda fn, cb, *args: cb(fn(*args)))
+    ws.node_table.edit_requested.emit("Node", row)
+    assert calls == [("Node", body)]
+    assert "namespace" not in body["metadata"]
+
+
 @pytest.mark.parametrize("cordoned, label, action", [(False, "Cordon…", "cordon"), (True, "Uncordon…", "uncordon")])
 def test_node_menu_actions_target_selected_node(qtbot, monkeypatch, cordoned, label, action):
     table = ResourceTable([("Name", "name")], "Node")
