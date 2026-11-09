@@ -526,6 +526,7 @@ class ResourceTable(QWidget):
         if self.kind == "Node":
             menu.addAction(f"Cordon {n} nodes…", bulk("cordon"))
             menu.addAction(f"Uncordon {n} nodes…", bulk("uncordon"))
+            menu.addAction(f"Drain {n} nodes…", bulk("drain"))
             menu.addSeparator()
             menu.addAction(f"Delete {n} nodes…", bulk("delete-node"))
             menu.addAction(f"Force delete {n} nodes…", bulk("force-delete-node"))

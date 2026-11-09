@@ -14,10 +14,13 @@ class DrainDialog(QDialog):
         self.kubeconfig = kubeconfig
         self.preview_loader = preview_loader  # fn(on_result, on_error): loads (pods, budgets); None = no preview
         self._preview_data = None
-        self.setWindowTitle("Drain node")
+        self.nodes = (node,) if isinstance(node, str) else tuple(node)
+        multiple = len(self.nodes) > 1
+        self.setWindowTitle(f"Drain {len(self.nodes)} nodes" if multiple else "Drain node")
         form = QFormLayout(self)
-        info = QLabel(f"Cluster: {context}\nNode: {node}\n\n"
-                      "Cordon this node and evict its pods. The node stays cordoned, including on failure or stop.\n"
+        targets = "Nodes: " + ", ".join(self.nodes) if multiple else f"Node: {self.nodes[0]}"
+        info = QLabel(f"Cluster: {context}\n{targets}\n\n"
+                      "Cordon the selected nodes and evict their pods. Nodes stay cordoned, including on failure or stop.\n"
                       "PodDisruptionBudgets and pod termination grace periods are respected.")
         info.setWordWrap(True)
         form.addRow(info)
@@ -35,7 +38,7 @@ class DrainDialog(QDialog):
         self.preview_button = QPushButton("Preview what will happen")
         self.preview_text = QPlainTextEdit(readOnly=True)
         self.preview_text.setMinimumHeight(160)
-        self.preview_text.setPlaceholderText("Press Preview to list the pods on this node and what would happen to each. Nothing is changed.")
+        self.preview_text.setPlaceholderText("Press Preview to list the pods on the selected nodes and what would happen to each. Nothing is changed.")
         if preview_loader is not None:
             form.addRow(self.preview_button)
             form.addRow(self.preview_text)
@@ -51,7 +54,7 @@ class DrainDialog(QDialog):
 
     def load_preview(self):
         self.preview_button.setEnabled(False)
-        self.preview_text.setPlainText("Loading the pods on this node…")
+        self.preview_text.setPlainText("Loading the pods on the selected nodes…")
         self.preview_loader(self._preview_loaded, self._preview_failed)
 
     def _preview_loaded(self, data):
@@ -78,12 +81,12 @@ class DrainDialog(QDialog):
                 line += f"  [{e['pdb']}]"
             lines.append(line)
         if not entries:
-            lines.append("No pods on this node.")
+            lines.append("No pods on the selected nodes.")
         self.preview_text.setPlainText(chr(10).join(lines))
 
     def command(self):
         argv = kubectl_base(self.context, self.kubeconfig) + [
-            "--request-timeout=30s", "drain", self.node, f"--timeout={self.timeout.value()}m"]
+            "--request-timeout=30s", "drain", *self.nodes, f"--timeout={self.timeout.value()}m"]
         for field, flag in ((self.ignore_daemonsets, "--ignore-daemonsets"),
                             (self.delete_emptydir, "--delete-emptydir-data"), (self.force, "--force")):
             if field.isChecked():
