@@ -1,7 +1,8 @@
+import re
 import time
 
 from PySide6.QtCore import QElapsedTimer, QItemSelectionModel, QSortFilterProxyModel, Qt, Signal, QTimer
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
                                QStackedWidget, QTableView, QToolButton, QVBoxLayout, QWidget)
 
 from ..k8s.clone import COPYABLE
@@ -571,6 +572,26 @@ class ResourceTable(QWidget):
                 for action in actions:
                     add(submenu, action)
 
+    def _cell_menu(self, menu, index):
+        """Capture the clicked value before a refresh can replace it; filtering uses the same column's underlying value."""
+        source = self.proxy.mapToSource(index)
+        attr = self.model.columns[source.column()][1]
+        value = index.data(Qt.EditRole if attr.startswith("annotation:") else Qt.DisplayRole)
+        text = "" if value is None else str(value)
+        copy = menu.addAction("Copy cell value", lambda: QApplication.clipboard().setText(text))
+        copy.setEnabled(bool(text))
+        name = filter_expr.normalize(attr)
+        found = self._resolve(self.model.rows[source.row()], name)
+        expression = None
+        if self._column_map().get(name) == attr and found is not None and found[0] is not None:
+            # Exact regex matching keeps wildcard characters, quotes and comparison signs literal. Hex escapes
+            # keep quotes out of the filter language's string delimiters, including values containing both kinds.
+            pattern = re.escape(str(found[0])).replace("'", r"\x27").replace('"', r"\x22")
+            expression = f"{name} ~ '\\A{pattern}\\Z'"
+        use = menu.addAction("Filter by this value", lambda: self.filter.setText(expression))
+        use.setEnabled(expression is not None)
+        menu.addSeparator()
+
     def _context_menu(self, pos):
         idx = self.view.indexAt(pos)
         menu = QMenu(self)
@@ -578,6 +599,7 @@ class ResourceTable(QWidget):
             if not self.view.selectionModel().isRowSelected(idx.row(), idx.parent()):
                 self.view.selectRow(idx.row())  # right-click outside the selection acts on that row alone
             rows = self.selected_rows()
+            self._cell_menu(menu, idx)
             if self.context_actions is not None:
                 self.context_actions(menu, rows)
                 if not menu.isEmpty():
