@@ -23,6 +23,8 @@ GitHub issues: items 1-12 are #51-#62 in table order; the Azure plugin is #63 an
 
 Separate, also not built: GCP and Azure plugins like the AWS one (see "Not built: GCP and Azure plugins" in `PLUGINS.md`).
 
+Table field actions (#203): right-click any cell to copy its value or use it as an exact column filter, including Nodes and Pods. Checked with offscreen tests; no manual display check.
+
 ## More ideas (second investigation)
 
 Also not implemented and **no issue filed yet**; effort and value are estimates. Ideas come from k9s, Lens, Headlamp and Aptakube (public pages; some from memory). Numbering continues the table above.

@@ -217,7 +217,7 @@ def test_combined_view_context_menu_compares_two_clusters_and_has_no_unhandled_a
     monkeypatch.setattr("klotse.ui.resource_table.QMenu", Menu)
     pos = table.view.visualRect(table.proxy.index(0, 0)).center()
     table._context_menu(pos)
-    expected = ["Compare these two…"]
+    expected = ["Copy cell value", "Filter by this value", "Compare these two…"]
     if kind == "Deployment":
         expected += ["Logs of all pods…", "Restart selected workloads…"]
     assert seen == expected
@@ -243,7 +243,8 @@ def test_combined_view_more_than_two_rows_has_no_unsupported_actions(qtbot, monk
 
     class Menu(QMenu):
         def exec(self, *_args):
-            pytest.fail("No actions are supported for this selection")
+            assert [a.text() for a in self.actions() if not a.isSeparator()] == [
+                "Copy cell value", "Filter by this value"]
 
     monkeypatch.setattr("klotse.ui.resource_table.QMenu", Menu)
     pos = dialog.table.view.visualRect(dialog.table.proxy.index(0, 0)).center()
@@ -266,11 +267,11 @@ def test_combined_view_single_row_menu_only_navigates_to_its_cluster(qtbot, monk
 
     def choose_navigation(menu, *_args):
         actions = [action for action in menu.actions() if not action.isSeparator()]
-        expected = ["Show in cluster"]
+        expected = ["Copy cell value", "Filter by this value", "Show in cluster"]
         if kind == "Deployment":
             expected += ["Logs of all pods…", "Restart selected workloads…"]
         assert [action.text() for action in actions] == expected
-        actions[0].trigger()
+        next(action for action in actions if action.text() == "Show in cluster").trigger()
 
     class Menu(QMenu):
         def exec(self, *args):
